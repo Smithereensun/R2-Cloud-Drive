@@ -4,7 +4,7 @@
 
 [![Telegram](https://img.shields.io/badge/Telegram-@HandsomMJZ-blue?logo=telegram)](https://t.me/HandsomMJZ)
 
-![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F1.png)
+![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F2.png)
 
 ## 功能特性
 
