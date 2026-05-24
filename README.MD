@@ -8,6 +8,8 @@
 - 🔄 **两种视图**：网格视图 / 列表视图，支持排序
 - ✂️ **复制/剪切/粘贴**：通过 KV 持久化剪贴板，跨页面导航不丢失
 - 🔗 **共享文件夹**：`/shared` 路径公开只读共享，无需登录即可下载
+- 📦 **大文件分片上传**：网页端自动使用 R2 Multipart Upload，突破单次请求大小限制
+- 🧩 **WebDAV 支持**：`/dav` 路径可挂载到支持 WebDAV 的客户端
 - 🌙 **夜间模式**：深色主题切换，自动记住偏好
 - 📊 **容量显示**：实时显示已用存储空间（默认 10 GB）
 - 🖱️ **右键菜单**：文件/文件夹右键快捷操作
@@ -23,10 +25,11 @@
 
 ### 步骤 1：创建 R2 存储桶
 
-```bash
-# 创建一个 R2 存储桶（名称自定）
-wrangler r2 bucket create my-cloud-drive
-```
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. 左侧菜单进入 **R2 Object Storage**
+3. 点击 **Create bucket**
+4. 输入存储桶名称，例如 `my-cloud-drive`
+5. 点击 **Create bucket**
 
 ### 步骤 2：创建 KV 命名空间
 
@@ -36,42 +39,36 @@ wrangler r2 bucket create my-cloud-drive
 4. 输入名称 `CLIPBOARD_KV`（**必须叫这个名称**）
 5. 点击 **创建**
 
-```bash
-# 创建 KV 命名空间用于剪贴板持久化
-wrangler kv:namespace create CLIPBOARD_KV
-```
+### 步骤 3：创建 Worker 并粘贴代码
 
-执行后会输出类似：
-```
-🌀 Creating namespace with title "my-cloud-drive-clipboard"
-✨ Success!
-Add the following to your wrangler.toml:
-[[kv_namespaces]]
-binding = "CLIPBOARD_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-```
+1. 左侧菜单进入 **Workers & Pages**
+2. 点击 **Create application** 或 **Create**
+3. 选择 **Worker**
+4. 输入 Worker 名称，例如 `r2-cloud-drive`
+5. 创建后进入 Worker 的在线编辑器
+6. 删除默认示例代码，把本项目的 `worker.js` 全部内容粘贴进去
+7. 点击 **Deploy** 保存部署
 
-### 步骤 4：配置 wrangler.toml
+### 步骤 4：绑定 R2 和 KV
 
-创建 `wrangler.toml` 文件：
+进入刚创建的 Worker 后，按下面方式添加绑定：
 
-```toml
-name = "r2-cloud-drive"
-main = "worker.js"
-compatibility_date = "2024-01-01"
+1. 打开 **Settings**
+2. 进入 **Bindings**
+3. 点击 **Add binding**
+4. 选择 **R2 bucket**
+5. Variable name 填写 `R2_BUCKET`
+6. R2 bucket 选择步骤 1 创建的存储桶
+7. 保存
+8. 再次点击 **Add binding**
+9. 选择 **KV namespace**
+10. Variable name 填写 `CLIPBOARD_KV`
+11. KV namespace 选择步骤 2 创建的命名空间
+12. 保存并点击 **Deploy**
 
-# R2 存储桶绑定
-[[r2_buckets]]
-binding = "R2_BUCKET"
-bucket_name = "my-cloud-drive"  # 替换为你在步骤 2 创建的名称
+> 注意：绑定名称必须完全一致，代码里使用的是 `env.R2_BUCKET` 和 `env.CLIPBOARD_KV`。
 
-# KV 命名空间绑定（剪贴板持久化）
-[[kv_namespaces]]
-binding = "CLIPBOARD_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 替换为步骤 3 输出的 ID
-```
-
-### 步骤 5：设置环境变量（可选）
+### 步骤 5：设置变量和密钥（可选）
 
 | 变量名 | 说明 | 是否必须 | 默认值 |
 |--------|------|---------|--------|
@@ -80,43 +77,21 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 替换为步骤 3 输出的 ID
 | `CLOUD_ICON_URL` | 云盘图标图片链接 | 可选 | 橙色圆角云朵图标 |
 | `LOGIN_BACKGROUND_URL` | 登录页背景图片链接 | 可选 | 淡灰色背景 |
 
-通过 Cloudflare Dashboard 或 Wrangler 设置：
+设置方法：
 
-```bash
-# 设置访问密码
-wrangler secret put ACCESS_PASSWORD
-# 然后输入你的密码
+1. 进入 Worker 的 **Settings**
+2. 打开 **Variables and Secrets**
+3. 点击 **Add**
+4. 选择变量类型：
+   - `ACCESS_PASSWORD` 建议选择 **Secret**
+   - `SITE_TITLE`、`CLOUD_ICON_URL`、`LOGIN_BACKGROUND_URL` 可选择普通文本变量
+5. 填写变量名和值
+6. 点击 **Save**
+7. 点击 **Deploy** 让配置生效
 
-# 设置站点标题
-wrangler secret put SITE_TITLE
-# 然后输入你的标题
+### 步骤 6：访问 Worker
 
-# 设置云盘图标图片链接
-wrangler secret put CLOUD_ICON_URL
-# 然后输入图片 URL
-
-# 设置登录页背景图片链接
-wrangler secret put LOGIN_BACKGROUND_URL
-# 然后输入图片 URL
-```
-
-也可以在 `wrangler.toml` 中设置变量（非敏感信息）：
-
-```toml
-[vars]
-SITE_TITLE = "我的云盘"
-CLOUD_ICON_URL = "https://example.com/icon.png"
-LOGIN_BACKGROUND_URL = "https://example.com/login-bg.jpg"
-```
-
-### 步骤 6：部署
-
-```bash
-# 发布到 Cloudflare Workers
-wrangler deploy
-```
-
-部署成功后，你会得到一个 `https://your-project.workers.dev` 的地址。
+部署成功后，在 Worker 页面可以看到一个 `https://你的项目名.你的账号.workers.dev` 地址，打开即可访问云盘。
 
 ### 步骤 7：自定义域名（可选）
 
@@ -144,19 +119,36 @@ wrangler deploy
 | 切换视图 | 点击工具栏的网格/列表切换按钮 |
 | 夜间模式 | 点击顶部的月亮/太阳图标 |
 
+### 大文件上传
+
+网页端上传大于约 90 MiB 的文件时会自动切换为分片上传，每片通过 Worker 上传到 R2 Multipart Upload，最后合并成一个完整对象。小文件仍使用普通上传。
+
+Cloudflare Free/Pro 的单次请求体限制为 100 MB，因此每个分片会控制在限制以内；R2 Multipart Upload 支持最多 10,000 个 part。
+
 ### 共享文件夹
 
-1. 在主界面（已登录）点击侧边栏「共享文件夹」进入 `/?path=shared`
+1. 创建根目录下的文件夹 `shared`
 2. 在此目录下上传需要公开分享的文件
 3. 未登录用户可通过 `https://你的域名/shared` 访问和下载这些文件
 4. 共享文件夹支持子目录结构
+
+### WebDAV
+
+WebDAV 地址：
+
+```text
+https://你的域名/dav
+```
+
+如果设置了 `ACCESS_PASSWORD`，WebDAV 使用 Basic Auth：用户名可随意填写，密码填写 `ACCESS_PASSWORD`。如果没有设置访问密码，则 WebDAV 公开可访问。
+
+当前支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`MKCOL`、`DELETE`、`MOVE`、`COPY`。注意：WebDAV 客户端上传通常是单次 `PUT`，仍受 Cloudflare 单次请求体大小限制；突破 100 MB 的分片上传主要适用于网页端上传。
 
 ## 项目结构
 
 ```
 r2-cloud-drive/
 ├── worker.js        # 主程序（Cloudflare Worker）
-├── wrangler.toml    # Cloudflare 配置
 └── README.MD        # 本文件
 ```
 
