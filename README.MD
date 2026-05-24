@@ -4,6 +4,8 @@
 
 [![Telegram](https://img.shields.io/badge/Telegram-@HandsomMJZ-blue?logo=telegram)](https://t.me/HandsomMJZ)
 
+![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F1.png)
+
 ## 功能特性
 
 - 📁 **文件管理**：上传、下载、删除、重命名、新建文件夹
