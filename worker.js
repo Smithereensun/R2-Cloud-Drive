@@ -31,6 +31,9 @@
  * 6. 登录页背景图 (可选 - 图片链接，不设置则为淡灰色)
  *    LOGIN_BACKGROUND_URL = "https://example.com/login-bg.jpg"
  *
+ * 7. 存储节点密钥 (可选 - 节点 Worker 接收分片时使用)
+ *    STORAGE_NODE_TOKEN = "your-node-token"
+ *
  * ============================================
  * 功能列表
  * ============================================
@@ -41,6 +44,7 @@
  * - 剪贴板通过 KV 持久化，跨页面导航不丢失
  * - 共享文件夹 (/shared) — 无需登录，只读下载
  * - 容量显示 (默认 10 GB)
+ * - 多账号存储节点：大文件分片分布存储 + manifest 索引
  * - 夜间模式切换 (深色主题)
  * - 拖拽上传，上传进度显示
  * - 右键上下文菜单
@@ -594,10 +598,15 @@ function renderHTML(content, title = 'R2 云盘') {
   .context-menu-divider { height: 1px; background: var(--outline); margin: 4px 0; }
 
   /* ── Storage Bar ── */
-  .storage-info { padding: 16px; margin-top: auto; }
+  .storage-info { padding: 16px; margin-top: auto; border: none; background: transparent; text-align: left; width: 100%; cursor: pointer; }
+  .storage-info:hover { background: rgba(60,64,67,.08); }
   .storage-bar { height: 4px; background: var(--outline); border-radius: 2px; overflow: hidden; margin: 6px 0; }
   .storage-fill { height: 100%; background: var(--primary); border-radius: 2px; }
   .storage-text { font-size: 12px; color: var(--on-surface-variant); }
+  .storage-details { display: none; margin-top: 12px; gap: 10px; flex-direction: column; }
+  .storage-info.expanded .storage-details { display: flex; }
+  .storage-node-name { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--on-surface); }
+  .storage-node-meta { font-size: 11px; color: var(--on-surface-variant); margin-top: 2px; }
 
   /* ── Selection Bar ── */
   .selection-bar {
@@ -656,6 +665,23 @@ function renderHTML(content, title = 'R2 云盘') {
   [data-theme="dark"] .action-btn:hover { background: rgba(232,234,237,.08); color: var(--on-surface); }
   [data-theme="dark"] .action-btn.danger:hover { background: rgba(242,139,130,.08); }
 
+  .node-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .node-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; border: 1px solid var(--outline);
+    border-radius: var(--radius-m); background: var(--background);
+  }
+  .node-row-main { flex: 1; min-width: 0; }
+  .node-row-title { font-size: 14px; font-weight: 500; color: var(--on-surface); }
+  .node-row-sub { font-size: 12px; color: var(--on-surface-variant); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-row-bar { height: 4px; background: var(--outline); border-radius: 2px; overflow: hidden; margin-top: 8px; }
+  .node-row-fill { height: 100%; background: var(--primary); border-radius: 2px; }
+  .node-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .node-form-grid .full { grid-column: 1 / -1; }
+  @media (max-width: 560px) {
+    .node-form-grid { grid-template-columns: 1fr; }
+  }
+
     /* ── Dark Mode Toggle ── */
   /* Icon is handled by JS toggleDarkMode() */
 </style>
@@ -706,8 +732,9 @@ function formatSize(bytes) {
 let clipboard = { items: [], action: null, sourcePath: '' }; // action: 'copy' or 'cut'
 
 // ── Storage ──
-const STORAGE_TOTAL = 10 * 1024 * 1024 * 1024; // 10 GB (client side constant, matches server)
+const STORAGE_TOTAL = 10 * 1024 * 1024 * 1024; // 10 GB per account/node
 let storageUsed = 0;
+let storageExpanded = false;
 
 // ── Snackbar ──
 let snackbarTimer;
@@ -1011,21 +1038,51 @@ async function updateStorageInfo() {
     const res = await fetch('/api/storage');
     const data = await res.json();
     storageUsed = data.used || 0;
+    const storageTotal = data.total || STORAGE_TOTAL;
     const fillEl = document.getElementById('storageFill');
     const textEl = document.getElementById('storageText');
     if (fillEl) {
-      const pct = Math.min(100, (storageUsed / STORAGE_TOTAL) * 100);
+      const pct = Math.min(100, (storageUsed / storageTotal) * 100);
       fillEl.style.width = pct + '%';
       if (pct > 85) fillEl.style.background = 'var(--error)';
       else if (pct > 60) fillEl.style.background = 'var(--warning)';
     }
     if (textEl) {
-      textEl.textContent = '已用 ' + formatSize(storageUsed) + ' / 共 ' + formatSize(STORAGE_TOTAL);
+      textEl.textContent = '已用 ' + formatSize(storageUsed) + ' / 共 ' + formatSize(storageTotal);
     }
+    window.storageInfoData = data;
+    renderStorageDetails(data.nodes || []);
   } catch(e) {
     const textEl = document.getElementById('storageText');
     if (textEl) textEl.textContent = '无法获取存储信息';
   }
+}
+
+function toggleStorageDetails() {
+  storageExpanded = !storageExpanded;
+  const info = document.getElementById('storageInfo');
+  if (info) info.classList.toggle('expanded', storageExpanded);
+  if (storageExpanded && !window.storageInfoData) updateStorageInfo();
+}
+
+function renderStorageDetails(nodes) {
+  const list = document.getElementById('storageDetails');
+  if (!list) return;
+  if (!nodes.length) {
+    list.innerHTML = '<div class="storage-node-meta">暂无节点容量信息</div>';
+    return;
+  }
+  list.innerHTML = nodes.map(node => {
+    const used = node.used || 0;
+    const total = node.total || STORAGE_TOTAL;
+    const pct = total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0;
+    const statusText = node.online === false ? ' · 离线' : (node.storageAvailable === false ? ' · 用量不可用' : '');
+    return '<div>' +
+      '<div class="storage-node-name"><span>' + escapeHtml(node.name || node.id) + '</span><span>' + pct + '%</span></div>' +
+      '<div class="storage-bar"><div class="storage-fill" style="width:' + pct + '%"></div></div>' +
+      '<div class="storage-node-meta">' + formatSize(used) + ' / ' + formatSize(total) + statusText + '</div>' +
+    '</div>';
+  }).join('');
 }
 function deleteSelected() {
   if (!selectedFiles.size) return;
@@ -1126,7 +1183,8 @@ function uploadSingleFile(file, path, fill, pctSpan) {
   if (file.size <= DIRECT_UPLOAD_LIMIT) {
     return uploadDirect(file, path, fill, pctSpan);
   }
-  return uploadMultipart(file, path, fill, pctSpan);
+  return uploadDistributed(file, path, fill, pctSpan)
+    .catch(() => uploadMultipart(file, path, fill, pctSpan));
 }
 
 function uploadDirect(file, path, fill, pctSpan) {
@@ -1235,6 +1293,159 @@ function uploadMultipartPart(path, uploadId, partNumber, chunk, onProgress) {
     xhr.onerror = () => reject(new Error('multipart part failed'));
     xhr.send(chunk);
   });
+}
+
+async function uploadDistributed(file, path, fill, pctSpan) {
+  const chunkSize = Math.min(MULTIPART_MAX_CHUNK, Math.max(MULTIPART_DEFAULT_CHUNK, Math.ceil(file.size / MULTIPART_MAX_PARTS)));
+  const totalParts = Math.ceil(file.size / chunkSize);
+  if (totalParts > MULTIPART_MAX_PARTS) throw new Error('too many distributed chunks');
+
+  const initRes = await fetch('/api/distributed/init', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      path,
+      size: file.size,
+      contentType: file.type || '',
+      chunkSize,
+      parts: totalParts
+    })
+  });
+  if (!initRes.ok) throw new Error('distributed storage unavailable');
+  const session = await initRes.json();
+  const sessionId = session.sessionId;
+
+  let uploadedBytes = 0;
+  try {
+    for (let index = 0; index < totalParts; index++) {
+      const partInfo = session.parts[index];
+      const start = index * chunkSize;
+      const end = Math.min(file.size, start + chunkSize);
+      const chunk = file.slice(start, end);
+      await uploadDistributedPart(partInfo, chunk, loaded => {
+        const pct = Math.min(99, Math.round((uploadedBytes + loaded) / file.size * 100));
+        fill.style.width = pct + '%';
+        pctSpan.textContent = pct + '%';
+      });
+      uploadedBytes += chunk.size;
+    }
+
+    const completeRes = await fetch('/api/distributed/complete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ sessionId })
+    });
+    if (!completeRes.ok) throw new Error('distributed complete failed');
+    fill.style.width = '100%';
+    fill.classList.add('done');
+    pctSpan.textContent = '✓';
+  } catch (err) {
+    if (sessionId) {
+      await fetch('/api/distributed/abort', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ sessionId })
+      }).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+function uploadDistributedPart(partInfo, chunk, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', partInfo.uploadUrl);
+    xhr.setRequestHeader('Authorization', 'Bearer ' + partInfo.token);
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(e.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error('distributed part failed'));
+    };
+    xhr.onerror = () => reject(new Error('distributed part failed'));
+    xhr.send(chunk);
+  });
+}
+
+function openStorageNodes() {
+  document.getElementById('storageNodesModal')?.classList.add('open');
+  loadStorageNodes();
+}
+function closeStorageNodes() {
+  document.getElementById('storageNodesModal')?.classList.remove('open');
+}
+async function loadStorageNodes() {
+  const list = document.getElementById('storageNodeList');
+  if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载中...</div></div></div>';
+  try {
+    const res = await fetch('/api/storage-nodes');
+    const data = await res.json();
+    renderStorageNodes(data.nodes || []);
+  } catch {
+    if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载失败</div></div></div>';
+  }
+}
+function renderStorageNodes(nodes) {
+  const list = document.getElementById('storageNodeList');
+  if (!list) return;
+  if (!nodes.length) {
+    list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">暂无存储节点，大文件将上传到主账号 R2</div></div></div>';
+    return;
+  }
+  list.innerHTML = nodes.map(node =>
+    '<div class="node-row">' +
+      '<div class="node-row-main">' +
+        '<div class="node-row-title">' + escapeHtml(node.name || node.id) + '</div>' +
+        '<div class="node-row-sub">' + escapeHtml(node.url) + ' · 权重 ' + (node.weight || 1) + ' · ' + (node.enabled ? '启用' : '停用') + '</div>' +
+      '</div>' +
+      '<button class="icon-btn" title="测试" onclick="testStorageNode(\\'' + node.id + '\\')">' +
+        '<span class="material-icons-round">network_check</span>' +
+      '</button>' +
+      '<button class="icon-btn" title="删除" onclick="deleteStorageNode(\\'' + node.id + '\\')">' +
+        '<span class="material-icons-round">delete_outline</span>' +
+      '</button>' +
+    '</div>'
+  ).join('');
+}
+function escapeHtml(value = '') {
+  return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+async function saveStorageNode() {
+  const name = document.getElementById('nodeNameInput')?.value?.trim();
+  const url = document.getElementById('nodeUrlInput')?.value?.trim();
+  const token = document.getElementById('nodeTokenInput')?.value?.trim();
+  const weight = document.getElementById('nodeWeightInput')?.value || '1';
+  if (!name || !url || !token) { showSnackbar('请填写节点名称、地址和密钥'); return; }
+  const res = await fetch('/api/storage-nodes', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, url, token, weight })
+  });
+  if (!res.ok) { showSnackbar('保存节点失败'); return; }
+  document.getElementById('nodeNameInput').value = '';
+  document.getElementById('nodeUrlInput').value = '';
+  document.getElementById('nodeTokenInput').value = '';
+  document.getElementById('nodeWeightInput').value = '1';
+  showSnackbar('节点已保存');
+  loadStorageNodes();
+}
+async function deleteStorageNode(id) {
+  if (!confirm('确定删除这个存储节点？')) return;
+  const res = await fetch('/api/storage-nodes?id=' + encodeURIComponent(id), { method: 'DELETE' });
+  showSnackbar(res.ok ? '节点已删除' : '删除节点失败');
+  loadStorageNodes();
+}
+async function testStorageNode(id) {
+  const res = await fetch('/api/storage-nodes/test?id=' + encodeURIComponent(id), { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) {
+    showSnackbar('节点正常，容量 ' + formatSize(data.used || 0) + ' / ' + formatSize(data.total || STORAGE_TOTAL));
+  } else if (data.ping && data.storage === false) {
+    showSnackbar('节点可连接，但容量接口不可用，请更新节点 Worker');
+  } else {
+    showSnackbar('节点连接失败');
+  }
 }
 
 function createFolder() {
@@ -1587,6 +1798,9 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     <button class="icon-btn" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
       <span class="material-icons-round">dark_mode</span>
     </button>
+    <button class="icon-btn" title="存储节点" onclick="openStorageNodes()">
+      <span class="material-icons-round">hub</span>
+    </button>
     <button class="icon-btn" title="刷新" onclick="location.reload()">
       <span class="material-icons-round">refresh</span>
     </button>
@@ -1605,6 +1819,9 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <button class="sidebar-item" onclick="openUpload()">
         <span class="material-icons-round">cloud_upload</span> 上传文件
       </button>
+      <button class="sidebar-item" onclick="openStorageNodes()">
+        <span class="material-icons-round">hub</span> 存储节点
+      </button>
     </div>
     <div class="sidebar-divider"></div>
     <div class="sidebar-section">
@@ -1616,7 +1833,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
         <span class="material-icons-round">folder_shared</span> 共享文件夹
       </a>
     </div>
-    <div class="storage-info">
+    <button class="storage-info" id="storageInfo" onclick="toggleStorageDetails()" title="查看容量明细">
       <div class="storage-text">
         <span>${files.length} 个文件，${folders.length} 个文件夹</span>
       </div>
@@ -1624,7 +1841,8 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
         <div class="storage-fill" id="storageFill" style="width:0%"></div>
       </div>
       <div class="storage-text" id="storageText">计算中...</div>
-    </div>
+      <div class="storage-details" id="storageDetails"></div>
+    </button>
   </nav>
 
   <main class="main">
@@ -1768,17 +1986,59 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     </div>
   </div>
 </div>
+
+<!-- Storage Nodes Modal -->
+<div class="modal-overlay" id="storageNodesModal" onclick="if(event.target===this)closeStorageNodes()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="material-icons-round" style="color:var(--primary)">hub</span>
+      <span class="modal-title">存储节点</span>
+    </div>
+    <div class="modal-body">
+      <div class="node-list" id="storageNodeList"></div>
+      <div class="node-form-grid">
+        <div>
+          <label class="field-label" for="nodeNameInput">节点名称</label>
+          <input class="text-field" id="nodeNameInput" type="text" placeholder="账号 A">
+        </div>
+        <div>
+          <label class="field-label" for="nodeWeightInput">权重</label>
+          <input class="text-field" id="nodeWeightInput" type="number" min="1" value="1">
+        </div>
+        <div class="full">
+          <label class="field-label" for="nodeUrlInput">节点 Worker 地址</label>
+          <input class="text-field" id="nodeUrlInput" type="url" placeholder="https://node.example.workers.dev">
+        </div>
+        <div class="full">
+          <label class="field-label" for="nodeTokenInput">节点密钥</label>
+          <input class="text-field" id="nodeTokenInput" type="password" placeholder="STORAGE_NODE_TOKEN">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outlined" onclick="closeStorageNodes()">关闭</button>
+      <button class="fab" style="box-shadow:none" onclick="saveStorageNode()">
+        <span class="material-icons-round">add</span> 添加节点
+      </button>
+    </div>
+  </div>
+</div>
 `, siteTitle);
 }
 
 // ── Session (Cookie-based) ──
 // ── Shared Folder Config ──
 const SHARED_PREFIX = 'shared'; // Shared folder name - accessible without login
-const STORAGE_TOTAL_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
+const STORAGE_TOTAL_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB per account/node
 
 const SESSION_COOKIE = 'r2drive_session';
 const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000;
 const DAV_PREFIX = '/dav';
+const STORAGE_NODES_KV_KEY = 'storage_nodes';
+const MULTIPART_SESSION_PREFIX = 'multipart_session_';
+const NODE_PART_PREFIX = '__r2drive_node_parts/';
+const MANIFEST_CONTENT_TYPE = 'application/vnd.r2drive.manifest+json';
+const MANIFEST_VERSION = 1;
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -1824,6 +2084,226 @@ function webDavAuthRequired() {
       'Content-Type': 'text/plain;charset=UTF-8'
     }
   });
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json;charset=UTF-8' }
+  });
+}
+
+function normalizeNodeUrl(url = '') {
+  return String(url || '').trim().replace(/\/+$/, '');
+}
+
+function sanitizeNode(node = {}) {
+  return {
+    id: String(node.id || '').trim(),
+    name: String(node.name || '').trim(),
+    url: normalizeNodeUrl(node.url),
+    token: String(node.token || '').trim(),
+    enabled: node.enabled !== false,
+    weight: Math.max(1, parseInt(node.weight || '1', 10) || 1)
+  };
+}
+
+function publicNode(node) {
+  return {
+    id: node.id,
+    name: node.name,
+    url: node.url,
+    enabled: node.enabled !== false,
+    weight: node.weight || 1
+  };
+}
+
+async function getStorageNodes(env, includeDisabled = false) {
+  if (!env.CLIPBOARD_KV) return [];
+  const raw = await env.CLIPBOARD_KV.get(STORAGE_NODES_KV_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const nodes = parsed.map(sanitizeNode).filter(node => node.id && node.url && node.token);
+    return includeDisabled ? nodes : nodes.filter(node => node.enabled !== false);
+  } catch {
+    return [];
+  }
+}
+
+async function saveStorageNodes(env, nodes) {
+  await env.CLIPBOARD_KV.put(STORAGE_NODES_KV_KEY, JSON.stringify(nodes.map(sanitizeNode)));
+}
+
+async function calculateR2Usage(R2) {
+  let totalUsed = 0;
+  let cursor;
+  let safety = 0;
+  do {
+    const listed = await R2.list({ cursor, limit: 1000, include: ['customMetadata'] });
+    for (const obj of listed.objects) {
+      const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
+      totalUsed += Number.isFinite(manifestSize) ? manifestSize : obj.size;
+    }
+    cursor = listed.cursor;
+    safety++;
+    if (safety > 100) break;
+  } while (cursor);
+  return totalUsed;
+}
+
+function getNodeAuthHeaders(node, extra = {}) {
+  return {
+    ...extra,
+    'Authorization': 'Bearer ' + node.token
+  };
+}
+
+function isNodeRequestAuthorized(request, env) {
+  const expected = env.STORAGE_NODE_TOKEN || env.ACCESS_PASSWORD;
+  if (!expected) return false;
+  const header = request.headers.get('Authorization') || '';
+  return header === 'Bearer ' + expected;
+}
+
+function nodeCorsHeaders(extra = {}) {
+  return {
+    ...extra,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Max-Age': '86400'
+  };
+}
+
+async function readManifestObject(obj) {
+  if (!obj) return null;
+  const contentType = obj.httpMetadata?.contentType || '';
+  if (contentType !== MANIFEST_CONTENT_TYPE && obj.customMetadata?.r2driveManifest !== '1') return null;
+  try {
+    return await new Response(obj.body).json();
+  } catch {
+    return null;
+  }
+}
+
+function isManifestFile(manifest) {
+  return manifest && manifest.type === 'distributed-file' && Array.isArray(manifest.parts);
+}
+
+async function resolveManifestParts(manifest, env) {
+  const nodes = await getStorageNodes(env, true);
+  const nodeMap = new Map(nodes.map(node => [node.id, node]));
+  return [...manifest.parts].sort((a, b) => a.partNumber - b.partNumber).map(part => {
+    const node = nodeMap.get(part.nodeId);
+    return {
+      ...part,
+      nodeUrl: part.nodeUrl || node?.url,
+      token: part.token || node?.token
+    };
+  });
+}
+
+async function fetchNodePart(part) {
+  if (!part.nodeUrl || !part.token) throw new Error('missing node credentials');
+  const res = await fetch(part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key), {
+    headers: { 'Authorization': 'Bearer ' + part.token }
+  });
+  if (!res.ok || !res.body) throw new Error('failed to fetch node part');
+  return res.body;
+}
+
+function concatStreams(streams) {
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        for (const stream of streams) {
+          const reader = stream.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+        }
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    }
+  });
+}
+
+async function streamManifestFile(manifest, env) {
+  const streams = [];
+  const parts = await resolveManifestParts(manifest, env);
+  for (const part of parts) {
+    streams.push(await fetchNodePart(part));
+  }
+  return concatStreams(streams);
+}
+
+async function deleteManifestParts(manifest, env) {
+  if (!isManifestFile(manifest)) return;
+  const parts = await resolveManifestParts(manifest, env);
+  await Promise.allSettled(parts.filter(part => part.nodeUrl && part.token).map(part => fetch(
+    part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key),
+    { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + part.token } }
+  )));
+}
+
+async function handleStorageNodeApi(request, env) {
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: nodeCorsHeaders({ 'Content-Length': '0' }) });
+  }
+  if (!isNodeRequestAuthorized(request, env)) {
+    return new Response('Unauthorized', { status: 401, headers: nodeCorsHeaders() });
+  }
+  const R2 = env.R2_BUCKET;
+  const url = new URL(request.url);
+
+  if (url.pathname === '/api/node/ping') {
+    return new Response(JSON.stringify({ ok: true, name: env.SITE_TITLE || 'R2 Storage Node' }), {
+      headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+    });
+  }
+
+  if (url.pathname === '/api/node/storage') {
+    const used = await calculateR2Usage(R2);
+    return new Response(JSON.stringify({ ok: true, used, total: STORAGE_TOTAL_BYTES }), {
+      headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+    });
+  }
+
+  const key = url.searchParams.get('key');
+  if (!key || key.includes('..')) return new Response('Missing key', { status: 400, headers: nodeCorsHeaders() });
+
+  if (url.pathname === '/api/node/part' && request.method === 'PUT') {
+    await R2.put(key, request.body, { httpMetadata: { contentType: 'application/octet-stream' } });
+    return new Response(JSON.stringify({ ok: true, key }), {
+      headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+    });
+  }
+
+  if (url.pathname === '/api/node/part' && request.method === 'GET') {
+    const obj = await R2.get(key);
+    if (!obj) return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
+    return new Response(obj.body, {
+      headers: nodeCorsHeaders({
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': obj.size?.toString() || ''
+      })
+    });
+  }
+
+  if (url.pathname === '/api/node/part' && request.method === 'DELETE') {
+    await R2.delete(key);
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+    });
+  }
+
+  return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
 }
 
 function davHeaders(extra = {}) {
@@ -1880,12 +2360,20 @@ function davPropResponse(request, key, item) {
   </D:response>`;
 }
 
-async function deleteR2Path(R2, key) {
+async function deleteR2Path(R2, key, env) {
   const prefix = key.endsWith('/') ? key : key + '/';
   const listed = await R2.list({ prefix });
   if (listed.objects.length > 0) {
-    await Promise.all(listed.objects.map(obj => R2.delete(obj.key)));
+    await Promise.all(listed.objects.map(async obj => {
+      const fullObj = await R2.get(obj.key);
+      const manifest = await readManifestObject(fullObj);
+      if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
+      await R2.delete(obj.key);
+    }));
   } else {
+    const obj = await R2.get(key);
+    const manifest = await readManifestObject(obj);
+    if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
     await R2.delete(key);
   }
 }
@@ -1940,9 +2428,10 @@ async function handleWebDav(request, env) {
     } else {
       const object = await R2.get(key);
       if (object) {
+        const manifestSize = object.customMetadata?.r2driveSize ? parseInt(object.customMetadata.r2driveSize, 10) : null;
         responses.push(davPropResponse(request, key, {
           type: 'file',
-          size: object.size,
+          size: Number.isFinite(manifestSize) ? manifestSize : object.size,
           uploaded: object.uploaded,
           etag: object.etag
         }));
@@ -1958,16 +2447,17 @@ async function handleWebDav(request, env) {
 
     if (depth !== '0') {
       const prefix = key ? key.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix, delimiter: '/' });
+      const listed = await R2.list({ prefix, delimiter: '/', include: ['customMetadata'] });
       for (const folder of listed.delimitedPrefixes || []) {
         responses.push(davPropResponse(request, folder, { type: 'folder' }));
       }
       for (const obj of listed.objects || []) {
         if (obj.key === prefix || obj.key.endsWith('/.keep')) continue;
         if (obj.key.slice(prefix.length).includes('/')) continue;
+        const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
         responses.push(davPropResponse(request, obj.key, {
           type: 'file',
-          size: obj.size,
+          size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
           uploaded: obj.uploaded,
           etag: obj.etag
         }));
@@ -1988,6 +2478,14 @@ ${responses.join('\n')}
     if (!key || key.endsWith('/')) return new Response('Not Found', { status: 404 });
     const obj = await R2.get(key);
     if (!obj) return new Response('Not Found', { status: 404 });
+    const manifest = await readManifestObject(obj);
+    if (isManifestFile(manifest)) {
+      const headers = davHeaders({
+        'Content-Type': manifest.contentType || getMimeType(key),
+        'Content-Length': manifest.size?.toString() || ''
+      });
+      return new Response(method === 'HEAD' ? null : await streamManifestFile(manifest, env), { headers });
+    }
     const headers = davHeaders({
       'Content-Type': getMimeType(key),
       'Content-Length': obj.size?.toString() || '',
@@ -2011,7 +2509,7 @@ ${responses.join('\n')}
 
   if (method === 'DELETE') {
     if (!key) return new Response('Forbidden', { status: 403 });
-    await deleteR2Path(R2, key);
+    await deleteR2Path(R2, key, env);
     return new Response(null, { status: 204, headers: davHeaders({ 'Content-Length': '0' }) });
   }
 
@@ -2027,7 +2525,7 @@ ${responses.join('\n')}
     if (!targetKey) return new Response('Invalid Destination', { status: 409 });
     try {
       await copyR2Path(R2, key, targetKey);
-      if (method === 'MOVE') await deleteR2Path(R2, key);
+      if (method === 'MOVE') await deleteR2Path(R2, key, env);
     } catch {
       return new Response('Not Found', { status: 404 });
     }
@@ -2065,6 +2563,10 @@ export default {
       return handleWebDav(request, env);
     }
 
+    if (path.startsWith('/api/node/')) {
+      return handleStorageNodeApi(request, env);
+    }
+
         // ── Auth endpoints ──
     if (path === '/login') {
       if (request.method === 'GET') return new Response(renderLoginPage('', siteTitle, cloudIconUrl, loginBackgroundUrl), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
@@ -2098,7 +2600,7 @@ export default {
       const subPath = url.searchParams.get('path') || '';
       const fullPrefix = subPath ? prefix + subPath.replace(/\/+$/, '') + '/' : prefix;
 
-      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/' });
+      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/', include: ['customMetadata'] });
 
       const folders = (listed.delimitedPrefixes || []).map(p => {
         return p.slice(fullPrefix.length).replace(/\/$/, '');
@@ -2106,11 +2608,14 @@ export default {
 
       const files = (listed.objects || [])
         .filter(obj => obj.key !== fullPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => ({
-          name: obj.key.slice(fullPrefix.length),
-          size: obj.size,
-          uploaded: obj.uploaded,
-        }))
+        .map(obj => {
+          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
+          return {
+            name: obj.key.slice(fullPrefix.length),
+            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
+            uploaded: obj.uploaded,
+          };
+        })
         .filter(f => f.name && !f.name.includes('/'));
 
       const html = renderSharedPage(folders, files, subPath, siteTitle, cloudIconUrl);
@@ -2121,7 +2626,7 @@ export default {
     if (path === '/api/shared-list') {
       const subPath = url.searchParams.get('path') || '';
       const fullPrefix = SHARED_PREFIX + '/' + (subPath ? subPath.replace(/\/+$/, '') + '/' : '');
-      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/' });
+      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/', include: ['customMetadata'] });
 
       const folders = (listed.delimitedPrefixes || []).map(p => {
         return p.slice(fullPrefix.length).replace(/\/$/, '');
@@ -2129,11 +2634,14 @@ export default {
 
       const files = (listed.objects || [])
         .filter(obj => obj.key !== fullPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => ({
-          name: obj.key.slice(fullPrefix.length),
-          size: obj.size,
-          uploaded: obj.uploaded,
-        }))
+        .map(obj => {
+          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
+          return {
+            name: obj.key.slice(fullPrefix.length),
+            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
+            uploaded: obj.uploaded,
+          };
+        })
         .filter(f => f.name && !f.name.includes('/'));
 
       return Response.json({ folders, files });
@@ -2184,6 +2692,16 @@ export default {
           if (filePath.startsWith(SHARED_PREFIX + '/')) {
             const obj = await R2.get(filePath);
             if (!obj) return new Response('File not found', { status: 404 });
+            const manifest = await readManifestObject(obj);
+            if (isManifestFile(manifest)) {
+              const body = await streamManifestFile(manifest, env);
+              const filename = filePath.split('/').pop();
+              const headers = new Headers();
+              headers.set('Content-Type', manifest.contentType || getMimeType(filePath));
+              headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+              headers.set('Content-Length', manifest.size?.toString() || '');
+              return new Response(body, { headers });
+            }
             const mime = getMimeType(filePath);
             const filename = filePath.split('/').pop();
             const headers = new Headers();
@@ -2201,11 +2719,68 @@ export default {
 
     // ── API Routes ──
 
+    if (path === '/api/storage-nodes' && request.method === 'GET') {
+      const nodes = await getStorageNodes(env, true);
+      return jsonResponse({ nodes: nodes.map(publicNode) });
+    }
+
+    if (path === '/api/storage-nodes' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const nodes = await getStorageNodes(env, true);
+      const node = sanitizeNode({
+        id: body.id || crypto.randomUUID(),
+        name: body.name,
+        url: body.url,
+        token: body.token,
+        enabled: body.enabled !== false,
+        weight: body.weight
+      });
+      if (!node.name || !node.url || !node.token) return jsonResponse({ ok: false, error: 'missing fields' }, 400);
+      const index = nodes.findIndex(item => item.id === node.id);
+      if (index >= 0) nodes[index] = node;
+      else nodes.push(node);
+      await saveStorageNodes(env, nodes);
+      return jsonResponse({ ok: true, node: publicNode(node) });
+    }
+
+    if (path === '/api/storage-nodes' && request.method === 'DELETE') {
+      const id = url.searchParams.get('id');
+      if (!id) return jsonResponse({ ok: false, error: 'missing id' }, 400);
+      const nodes = await getStorageNodes(env, true);
+      await saveStorageNodes(env, nodes.filter(node => node.id !== id));
+      return jsonResponse({ ok: true });
+    }
+
+    if (path === '/api/storage-nodes/test' && request.method === 'POST') {
+      const id = url.searchParams.get('id');
+      const nodes = await getStorageNodes(env, true);
+      const node = nodes.find(item => item.id === id);
+      if (!node) return jsonResponse({ ok: false, error: 'not found' }, 404);
+      const ping = await fetch(node.url + '/api/node/ping?key=ping', {
+        headers: getNodeAuthHeaders(node)
+      }).catch(() => null);
+      if (!ping?.ok) return jsonResponse({ ok: false, error: 'ping failed' }, 502);
+      const storage = await fetch(node.url + '/api/node/storage?key=storage', {
+        headers: getNodeAuthHeaders(node)
+      }).catch(() => null);
+      if (!storage?.ok) {
+        return jsonResponse({ ok: false, ping: true, storage: false, error: 'storage unavailable' }, 502);
+      }
+      const storageData = await storage.json().catch(() => ({}));
+      return jsonResponse({
+        ok: true,
+        ping: true,
+        storage: true,
+        used: storageData.used || 0,
+        total: storageData.total || STORAGE_TOTAL_BYTES
+      });
+    }
+
     // List files
     if (path === '/api/list') {
       const prefix = url.searchParams.get('path') || '';
       const cleanPrefix = prefix ? prefix.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/' });
+      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/', include: ['customMetadata'] });
 
       const folders = (listed.delimitedPrefixes || []).map(p => {
         const name = p.slice(cleanPrefix.length).replace(/\/$/, '');
@@ -2214,12 +2789,15 @@ export default {
 
       const files = (listed.objects || [])
         .filter(obj => obj.key !== cleanPrefix)
-        .map(obj => ({
-          name: obj.key.slice(cleanPrefix.length),
-          size: obj.size,
-          uploaded: obj.uploaded,
-          etag: obj.etag,
-        }))
+        .map(obj => {
+          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
+          return {
+            name: obj.key.slice(cleanPrefix.length),
+            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
+            uploaded: obj.uploaded,
+            etag: obj.etag,
+          };
+        })
         .filter(f => f.name && !f.name.includes('/'));
 
       return Response.json({ folders, files });
@@ -2227,19 +2805,50 @@ export default {
 
         // Storage usage (for capacity display)
         if (path === '/api/storage') {
-          let totalUsed = 0;
-          let cursor;
-          let safety = 0;
-          do {
-            const listed = await R2.list({ cursor, limit: 1000 });
-            for (const obj of listed.objects) {
-              totalUsed += obj.size;
+          const nodes = await getStorageNodes(env);
+          const mainUsed = await calculateR2Usage(R2);
+          const usageNodes = [{
+            id: 'main',
+            name: '主控账号',
+            used: mainUsed,
+            total: STORAGE_TOTAL_BYTES,
+            online: true
+          }];
+
+          const nodeUsages = await Promise.all(nodes.map(async node => {
+            try {
+              const res = await fetch(node.url + '/api/node/storage?key=storage', {
+                headers: getNodeAuthHeaders(node)
+              });
+              if (!res.ok) throw new Error('storage unavailable');
+              const data = await res.json();
+              return {
+                id: node.id,
+                name: node.name,
+                used: data.used || 0,
+                total: data.total || STORAGE_TOTAL_BYTES,
+                online: true,
+                storageAvailable: true
+              };
+            } catch {
+              const ping = await fetch(node.url + '/api/node/ping?key=ping', {
+                headers: getNodeAuthHeaders(node)
+              }).catch(() => null);
+              return {
+                id: node.id,
+                name: node.name,
+                used: 0,
+                total: STORAGE_TOTAL_BYTES,
+                online: !!ping?.ok,
+                storageAvailable: false
+              };
             }
-            cursor = listed.cursor;
-            safety++;
-            if (safety > 100) break; // safety limit
-          } while (cursor);
-          return Response.json({ used: totalUsed, total: STORAGE_TOTAL_BYTES });
+          }));
+
+          usageNodes.push(...nodeUsages);
+          const used = usageNodes.reduce((sum, node) => sum + (node.used || 0), 0);
+          const total = usageNodes.reduce((sum, node) => sum + (node.total || STORAGE_TOTAL_BYTES), 0);
+          return Response.json({ used, total, nodes: usageNodes });
         }
 
     // Download / serve file
@@ -2248,6 +2857,16 @@ export default {
       if (!filePath) return new Response('Missing path', { status: 400 });
       const obj = await R2.get(filePath);
       if (!obj) return new Response('File not found', { status: 404 });
+      const manifest = await readManifestObject(obj);
+      if (isManifestFile(manifest)) {
+        const body = await streamManifestFile(manifest, env);
+        const filename = filePath.split('/').pop();
+        const headers = new Headers();
+        headers.set('Content-Type', manifest.contentType || getMimeType(filePath));
+        headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+        headers.set('Content-Length', manifest.size?.toString() || '');
+        return new Response(body, { headers });
+      }
       const mime = getMimeType(filePath);
       const filename = filePath.split('/').pop();
       const headers = new Headers();
@@ -2306,6 +2925,110 @@ export default {
       return Response.json({ ok: true });
     }
 
+    if (path === '/api/distributed/init' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const filePath = String(body.path || '').trim();
+      const fileSize = Number(body.size || 0);
+      const chunkSize = Number(body.chunkSize || 0);
+      const totalParts = Number(body.parts || 0);
+      if (!filePath || fileSize <= 0 || chunkSize <= 0 || totalParts <= 0) {
+        return jsonResponse({ ok: false, error: 'missing fields' }, 400);
+      }
+      const nodes = await getStorageNodes(env);
+      if (!nodes.length) return jsonResponse({ ok: false, error: 'no storage nodes' }, 409);
+
+      const weightedNodes = [];
+      for (const node of nodes) {
+        for (let i = 0; i < (node.weight || 1); i++) weightedNodes.push(node);
+      }
+      const sessionId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const parts = [];
+
+      for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+        const node = weightedNodes[(partNumber - 1) % weightedNodes.length];
+        const partKey = NODE_PART_PREFIX + sessionId + '/' + String(partNumber).padStart(6, '0');
+        parts.push({
+          partNumber,
+          size: Math.min(chunkSize, fileSize - (partNumber - 1) * chunkSize),
+          key: partKey,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeUrl: node.url,
+          token: node.token,
+          uploadUrl: node.url + '/api/node/part?key=' + encodeURIComponent(partKey)
+        });
+      }
+
+      const session = {
+        version: MANIFEST_VERSION,
+        sessionId,
+        path: filePath,
+        size: fileSize,
+        contentType: body.contentType || getMimeType(filePath),
+        chunkSize,
+        createdAt: now,
+        parts
+      };
+      await env.CLIPBOARD_KV.put(MULTIPART_SESSION_PREFIX + sessionId, JSON.stringify(session), { expirationTtl: 86400 });
+      return jsonResponse({
+        ok: true,
+        sessionId,
+        parts: parts.map(part => ({
+          partNumber: part.partNumber,
+          size: part.size,
+          uploadUrl: part.uploadUrl,
+          token: part.token
+        }))
+      });
+    }
+
+    if (path === '/api/distributed/complete' && request.method === 'POST') {
+      const { sessionId } = await request.json().catch(() => ({}));
+      if (!sessionId) return jsonResponse({ ok: false, error: 'missing sessionId' }, 400);
+      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      if (!raw) return jsonResponse({ ok: false, error: 'session expired' }, 404);
+      const session = JSON.parse(raw);
+      const manifest = {
+        type: 'distributed-file',
+        version: MANIFEST_VERSION,
+        path: session.path,
+        size: session.size,
+        contentType: session.contentType,
+        createdAt: session.createdAt,
+        completedAt: new Date().toISOString(),
+        parts: session.parts.map(part => ({
+          partNumber: part.partNumber,
+          size: part.size,
+          key: part.key,
+          nodeId: part.nodeId,
+          nodeName: part.nodeName,
+          nodeUrl: part.nodeUrl
+        }))
+      };
+      await R2.put(session.path, JSON.stringify(manifest), {
+        httpMetadata: { contentType: MANIFEST_CONTENT_TYPE },
+        customMetadata: {
+          r2driveManifest: '1',
+          r2driveSize: String(session.size)
+        }
+      });
+      await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
+      return jsonResponse({ ok: true });
+    }
+
+    if (path === '/api/distributed/abort' && request.method === 'POST') {
+      const { sessionId } = await request.json().catch(() => ({}));
+      if (!sessionId) return jsonResponse({ ok: false, error: 'missing sessionId' }, 400);
+      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      if (raw) {
+        const session = JSON.parse(raw);
+        await deleteManifestParts({ type: 'distributed-file', parts: session.parts }, env);
+        await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
+      }
+      return jsonResponse({ ok: true });
+    }
+
     // Delete file/folder
     if (path === '/api/delete' && request.method === 'DELETE') {
       const filePath = url.searchParams.get('path');
@@ -2314,8 +3037,16 @@ export default {
       const prefix = filePath.endsWith('/') ? filePath : filePath + '/';
       const listed = await R2.list({ prefix });
       if (listed.objects.length > 0) {
-        await Promise.all(listed.objects.map(obj => R2.delete(obj.key)));
+        await Promise.all(listed.objects.map(async obj => {
+          const fullObj = await R2.get(obj.key);
+          const manifest = await readManifestObject(fullObj);
+          if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
+          await R2.delete(obj.key);
+        }));
       } else {
+        const obj = await R2.get(filePath);
+        const manifest = await readManifestObject(obj);
+        if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
         await R2.delete(filePath);
       }
       return Response.json({ ok: true });
@@ -2327,6 +3058,19 @@ export default {
       if (!from || !to) return new Response('Missing fields', { status: 400 });
       const obj = await R2.get(from);
       if (!obj) return new Response('Not found', { status: 404 });
+      const manifest = await readManifestObject(obj);
+      if (isManifestFile(manifest)) {
+        manifest.path = to;
+        await R2.put(to, JSON.stringify(manifest), {
+          httpMetadata: { contentType: MANIFEST_CONTENT_TYPE },
+          customMetadata: {
+            r2driveManifest: '1',
+            r2driveSize: String(manifest.size || 0)
+          }
+        });
+        await R2.delete(from);
+        return Response.json({ ok: true });
+      }
       const mime = getMimeType(to);
       await R2.put(to, obj.body, { httpMetadata: { contentType: mime } });
       await R2.delete(from);
@@ -2346,7 +3090,7 @@ export default {
     if (path === '/' || path === '') {
       const prefix = url.searchParams.get('path') || '';
       const cleanPrefix = prefix ? prefix.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/' });
+      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/', include: ['customMetadata'] });
 
       const folders = (listed.delimitedPrefixes || []).map(p => {
         return p.slice(cleanPrefix.length).replace(/\/$/, '');
@@ -2354,11 +3098,14 @@ export default {
 
       const files = (listed.objects || [])
         .filter(obj => obj.key !== cleanPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => ({
-          name: obj.key.slice(cleanPrefix.length),
-          size: obj.size,
-          uploaded: obj.uploaded,
-        }))
+        .map(obj => {
+          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
+          return {
+            name: obj.key.slice(cleanPrefix.length),
+            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
+            uploaded: obj.uploaded,
+          };
+        })
         .filter(f => f.name && !f.name.includes('/'));
 
       const html = renderDrivePage(folders, files, prefix, siteTitle, cloudIconUrl);
