@@ -285,10 +285,12 @@ function renderHTML(content, title = 'R2 云盘') {
     display: flex; align-items: center; gap: 12px;
     padding: 0 16px; height: 40px; cursor: pointer;
     border-radius: var(--radius-xl); margin: 2px 8px;
+    border: none; background: transparent;
     color: var(--on-surface-variant);
     transition: background .15s;
     text-decoration: none; font-size: 14px;
     font-family: var(--font-body); font-weight: 500;
+    width: calc(100% - 16px); text-align: left;
   }
   .sidebar-item:hover { background: rgba(60,64,67,.08); }
   .sidebar-item.active {
@@ -1091,11 +1093,16 @@ function handleDragOver(e) { e.preventDefault(); document.querySelector('.upload
 function handleDragLeave() { document.querySelector('.upload-zone')?.classList.remove('drag-over'); }
 function handleFileInput(e) { uploadFiles(e.target.files); }
 
+const DIRECT_UPLOAD_LIMIT = 90 * 1024 * 1024;
+const MULTIPART_DEFAULT_CHUNK = 32 * 1024 * 1024;
+const MULTIPART_MAX_CHUNK = 90 * 1024 * 1024;
+const MULTIPART_MAX_PARTS = 10000;
+
 function uploadFiles(files) {
   if (!files.length) return;
   const list = document.getElementById('progressList');
   if (list) list.innerHTML = '';
-  [...files].forEach(file => {
+  const tasks = [...files].map(file => {
     const item = document.createElement('div'); item.className = 'progress-item';
     const nameRow = document.createElement('div'); nameRow.className = 'progress-item-name';
     const nameSpan = document.createElement('span'); nameSpan.textContent = file.name;
@@ -1107,6 +1114,23 @@ function uploadFiles(files) {
     if (list) list.append(item);
 
     const path = currentPath ? currentPath + '/' + file.name : file.name;
+    return uploadSingleFile(file, path, fill, pctSpan);
+  });
+
+  Promise.allSettled(tasks).then(() => {
+    showSnackbar('上传完成', '刷新', () => location.reload());
+  });
+}
+
+function uploadSingleFile(file, path, fill, pctSpan) {
+  if (file.size <= DIRECT_UPLOAD_LIMIT) {
+    return uploadDirect(file, path, fill, pctSpan);
+  }
+  return uploadMultipart(file, path, fill, pctSpan);
+}
+
+function uploadDirect(file, path, fill, pctSpan) {
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/upload?path=' + encodeURIComponent(path));
     xhr.upload.onprogress = e => {
@@ -1116,16 +1140,100 @@ function uploadFiles(files) {
       }
     };
     xhr.onload = () => {
-      if (xhr.status === 200) { fill.classList.add('done'); pctSpan.textContent = '✓'; }
-      else { fill.classList.add('error'); pctSpan.textContent = '✗'; }
-    };
-    xhr.onerror = () => { fill.classList.add('error'); pctSpan.textContent = '✗'; };
-    xhr.send(file);
-    xhr.onloadend = () => {
-      if ([...list.querySelectorAll('.progress-fill')].every(f => f.classList.contains('done') || f.classList.contains('error'))) {
-        showSnackbar('上传完成', '刷新', () => location.reload());
+      if (xhr.status === 200) {
+        fill.classList.add('done'); pctSpan.textContent = '✓'; resolve();
+      } else {
+        fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error('upload failed'));
       }
     };
+    xhr.onerror = () => {
+      fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error('upload failed'));
+    };
+    xhr.send(file);
+  });
+}
+
+async function uploadMultipart(file, path, fill, pctSpan) {
+  const chunkSize = Math.min(MULTIPART_MAX_CHUNK, Math.max(MULTIPART_DEFAULT_CHUNK, Math.ceil(file.size / MULTIPART_MAX_PARTS)));
+  const totalParts = Math.ceil(file.size / chunkSize);
+  if (totalParts > MULTIPART_MAX_PARTS) {
+    fill.classList.add('error'); pctSpan.textContent = '文件过大';
+    throw new Error('too many multipart chunks');
+  }
+
+  let uploadId = '';
+  const parts = [];
+  let uploadedBytes = 0;
+
+  try {
+    const initRes = await fetch('/api/multipart/init', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ path, contentType: file.type || '' })
+    });
+    if (!initRes.ok) throw new Error('multipart init failed');
+    const initData = await initRes.json();
+    uploadId = initData.uploadId;
+
+    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+      const start = (partNumber - 1) * chunkSize;
+      const end = Math.min(file.size, start + chunkSize);
+      const chunk = file.slice(start, end);
+      const part = await uploadMultipartPart(path, uploadId, partNumber, chunk, loaded => {
+        const pct = Math.min(99, Math.round((uploadedBytes + loaded) / file.size * 100));
+        fill.style.width = pct + '%';
+        pctSpan.textContent = pct + '%';
+      });
+      uploadedBytes += chunk.size;
+      parts.push(part);
+    }
+
+    const completeRes = await fetch('/api/multipart/complete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ path, uploadId, parts })
+    });
+    if (!completeRes.ok) throw new Error('multipart complete failed');
+    fill.style.width = '100%';
+    fill.classList.add('done');
+    pctSpan.textContent = '✓';
+  } catch (err) {
+    if (uploadId) {
+      fetch('/api/multipart/abort', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ path, uploadId })
+      }).catch(() => {});
+    }
+    fill.classList.add('error');
+    pctSpan.textContent = '✗';
+    throw err;
+  }
+}
+
+function uploadMultipartPart(path, uploadId, partNumber, chunk, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = '/api/multipart/part?path=' + encodeURIComponent(path)
+      + '&uploadId=' + encodeURIComponent(uploadId)
+      + '&partNumber=' + partNumber;
+    xhr.open('POST', url);
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(e.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status !== 200) {
+        reject(new Error('multipart part failed'));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    xhr.onerror = () => reject(new Error('multipart part failed'));
+    xhr.send(chunk);
   });
 }
 
@@ -1494,7 +1602,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <a class="sidebar-item active" href="/">
         <span class="material-icons-round">cloud</span> 我的云盘
       </a>
-      <button class="sidebar-item" onclick="openUpload()" style="width:calc(100% - 16px);border:none;cursor:pointer;font-family:var(--font-body)">
+      <button class="sidebar-item" onclick="openUpload()">
         <span class="material-icons-round">cloud_upload</span> 上传文件
       </button>
     </div>
@@ -1670,6 +1778,7 @@ const STORAGE_TOTAL_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 
 const SESSION_COOKIE = 'r2drive_session';
 const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000;
+const DAV_PREFIX = '/dav';
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -1694,6 +1803,243 @@ function getCookie(request, name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function isWebDavAuthenticated(request, env) {
+  if (!env.ACCESS_PASSWORD) return true;
+  const header = request.headers.get('Authorization') || '';
+  if (!header.startsWith('Basic ')) return false;
+  try {
+    const decoded = atob(header.slice(6));
+    const password = decoded.slice(decoded.indexOf(':') + 1);
+    return password === env.ACCESS_PASSWORD;
+  } catch {
+    return false;
+  }
+}
+
+function webDavAuthRequired() {
+  return new Response('WebDAV authentication required', {
+    status: 401,
+    headers: {
+      'WWW-Authenticate': 'Basic realm="R2 Cloud Drive WebDAV"',
+      'Content-Type': 'text/plain;charset=UTF-8'
+    }
+  });
+}
+
+function davHeaders(extra = {}) {
+  const headers = new Headers(extra);
+  headers.set('DAV', '1, 2');
+  headers.set('MS-Author-Via', 'DAV');
+  return headers;
+}
+
+function xmlEscape(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function stripDavPrefix(pathname) {
+  const raw = pathname.slice(DAV_PREFIX.length);
+  return decodeURIComponent(raw.replace(/^\/+/, ''));
+}
+
+function davHref(request, key, isCollection = false) {
+  const url = new URL(request.url);
+  const base = DAV_PREFIX + '/' + key.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const href = base + (isCollection && base !== DAV_PREFIX + '/' && !base.endsWith('/') ? '/' : '');
+  return xmlEscape(url.origin + href);
+}
+
+function davPropResponse(request, key, item) {
+  const isCollection = item.type === 'folder';
+  const href = davHref(request, key, isCollection);
+  const displayName = key.split('/').filter(Boolean).pop() || 'dav';
+  const modified = item.uploaded ? new Date(item.uploaded).toUTCString() : new Date().toUTCString();
+  const contentLength = isCollection ? 0 : (item.size || 0);
+  const resourceType = isCollection ? '<D:collection/>' : '';
+  const contentType = isCollection ? 'httpd/unix-directory' : getMimeType(key);
+  const etag = item.etag ? `<D:getetag>"${xmlEscape(item.etag)}"</D:getetag>` : '';
+
+  return `<D:response>
+    <D:href>${href}</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>${xmlEscape(displayName)}</D:displayname>
+        <D:resourcetype>${resourceType}</D:resourcetype>
+        <D:getcontentlength>${contentLength}</D:getcontentlength>
+        <D:getcontenttype>${xmlEscape(contentType)}</D:getcontenttype>
+        <D:getlastmodified>${modified}</D:getlastmodified>
+        ${etag}
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>`;
+}
+
+async function deleteR2Path(R2, key) {
+  const prefix = key.endsWith('/') ? key : key + '/';
+  const listed = await R2.list({ prefix });
+  if (listed.objects.length > 0) {
+    await Promise.all(listed.objects.map(obj => R2.delete(obj.key)));
+  } else {
+    await R2.delete(key);
+  }
+}
+
+async function copyR2Path(R2, from, to) {
+  const fromPrefix = from.endsWith('/') ? from : from + '/';
+  const listed = await R2.list({ prefix: fromPrefix });
+  if (listed.objects.length > 0) {
+    await Promise.all(listed.objects.map(async obj => {
+      const source = await R2.get(obj.key);
+      if (!source) return;
+      const targetKey = (to.endsWith('/') ? to : to + '/') + obj.key.slice(fromPrefix.length);
+      await R2.put(targetKey, source.body, {
+        httpMetadata: { contentType: getMimeType(targetKey) },
+        customMetadata: source.customMetadata
+      });
+    }));
+    return;
+  }
+
+  const source = await R2.get(from);
+  if (!source) throw new Error('not found');
+  await R2.put(to, source.body, {
+    httpMetadata: { contentType: getMimeType(to) },
+    customMetadata: source.customMetadata
+  });
+}
+
+async function handleWebDav(request, env) {
+  if (!isWebDavAuthenticated(request, env)) return webDavAuthRequired();
+  const R2 = env.R2_BUCKET;
+  const url = new URL(request.url);
+  const key = stripDavPrefix(url.pathname);
+  const method = request.method.toUpperCase();
+
+  if (method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: davHeaders({
+        'Allow': 'OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, COPY',
+        'Content-Length': '0'
+      })
+    });
+  }
+
+  if (method === 'PROPFIND') {
+    const depth = request.headers.get('Depth') || 'infinity';
+    const responses = [];
+
+    if (!key) {
+      responses.push(davPropResponse(request, '', { type: 'folder' }));
+    } else {
+      const object = await R2.get(key);
+      if (object) {
+        responses.push(davPropResponse(request, key, {
+          type: 'file',
+          size: object.size,
+          uploaded: object.uploaded,
+          etag: object.etag
+        }));
+      } else {
+        const folderPrefix = key.replace(/\/+$/, '') + '/';
+        const listed = await R2.list({ prefix: folderPrefix, delimiter: '/', limit: 1 });
+        if ((listed.objects || []).length === 0 && (listed.delimitedPrefixes || []).length === 0) {
+          return new Response('Not Found', { status: 404 });
+        }
+        responses.push(davPropResponse(request, folderPrefix, { type: 'folder' }));
+      }
+    }
+
+    if (depth !== '0') {
+      const prefix = key ? key.replace(/\/+$/, '') + '/' : '';
+      const listed = await R2.list({ prefix, delimiter: '/' });
+      for (const folder of listed.delimitedPrefixes || []) {
+        responses.push(davPropResponse(request, folder, { type: 'folder' }));
+      }
+      for (const obj of listed.objects || []) {
+        if (obj.key === prefix || obj.key.endsWith('/.keep')) continue;
+        if (obj.key.slice(prefix.length).includes('/')) continue;
+        responses.push(davPropResponse(request, obj.key, {
+          type: 'file',
+          size: obj.size,
+          uploaded: obj.uploaded,
+          etag: obj.etag
+        }));
+      }
+    }
+
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+${responses.join('\n')}
+</D:multistatus>`;
+    return new Response(xml, {
+      status: 207,
+      headers: davHeaders({ 'Content-Type': 'application/xml; charset=utf-8' })
+    });
+  }
+
+  if (method === 'GET' || method === 'HEAD') {
+    if (!key || key.endsWith('/')) return new Response('Not Found', { status: 404 });
+    const obj = await R2.get(key);
+    if (!obj) return new Response('Not Found', { status: 404 });
+    const headers = davHeaders({
+      'Content-Type': getMimeType(key),
+      'Content-Length': obj.size?.toString() || '',
+      'ETag': obj.etag || ''
+    });
+    return new Response(method === 'HEAD' ? null : obj.body, { headers });
+  }
+
+  if (method === 'PUT') {
+    if (!key || key.endsWith('/')) return new Response('Invalid destination', { status: 409 });
+    await R2.put(key, request.body, { httpMetadata: { contentType: getMimeType(key) } });
+    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
+  }
+
+  if (method === 'MKCOL') {
+    if (!key) return new Response('Conflict', { status: 409 });
+    const folderKey = key.replace(/\/+$/, '') + '/.keep';
+    await R2.put(folderKey, new Uint8Array(0));
+    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
+  }
+
+  if (method === 'DELETE') {
+    if (!key) return new Response('Forbidden', { status: 403 });
+    await deleteR2Path(R2, key);
+    return new Response(null, { status: 204, headers: davHeaders({ 'Content-Length': '0' }) });
+  }
+
+  if (method === 'MOVE' || method === 'COPY') {
+    if (!key) return new Response('Forbidden', { status: 403 });
+    const destination = request.headers.get('Destination');
+    if (!destination) return new Response('Missing Destination', { status: 400 });
+    const destinationUrl = new URL(destination, url.origin);
+    if (!destinationUrl.pathname.startsWith(DAV_PREFIX)) {
+      return new Response('Invalid Destination', { status: 400 });
+    }
+    const targetKey = stripDavPrefix(destinationUrl.pathname);
+    if (!targetKey) return new Response('Invalid Destination', { status: 409 });
+    try {
+      await copyR2Path(R2, key, targetKey);
+      if (method === 'MOVE') await deleteR2Path(R2, key);
+    } catch {
+      return new Response('Not Found', { status: 404 });
+    }
+    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
+  }
+
+  return new Response('Method Not Allowed', {
+    status: 405,
+    headers: davHeaders({ 'Allow': 'OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, COPY' })
+  });
+}
+
 async function isAuthenticated(request, env) {
   if (!env.ACCESS_PASSWORD) return true; // no password set = public
   const token = getCookie(request, SESSION_COOKIE);
@@ -1713,6 +2059,10 @@ export default {
 
     if (!R2) {
       return new Response('未配置 R2 存储桶。请在 wrangler.toml 中绑定 R2_BUCKET。', { status: 500 });
+    }
+
+    if (path === DAV_PREFIX || path.startsWith(DAV_PREFIX + '/')) {
+      return handleWebDav(request, env);
     }
 
         // ── Auth endpoints ──
@@ -1914,6 +2264,45 @@ export default {
       if (!filePath) return new Response('Missing path', { status: 400 });
       const mime = getMimeType(filePath);
       await R2.put(filePath, request.body, { httpMetadata: { contentType: mime } });
+      return Response.json({ ok: true });
+    }
+
+    // Multipart upload for files larger than the Worker request body limit.
+    if (path === '/api/multipart/init' && request.method === 'POST') {
+      const { path: filePath, contentType } = await request.json().catch(() => ({}));
+      if (!filePath) return new Response('Missing path', { status: 400 });
+      const mime = contentType || getMimeType(filePath);
+      const upload = await R2.createMultipartUpload(filePath, { httpMetadata: { contentType: mime } });
+      return Response.json({ key: upload.key, uploadId: upload.uploadId });
+    }
+
+    if (path === '/api/multipart/part' && request.method === 'POST') {
+      const filePath = url.searchParams.get('path');
+      const uploadId = url.searchParams.get('uploadId');
+      const partNumber = parseInt(url.searchParams.get('partNumber') || '', 10);
+      if (!filePath || !uploadId || !Number.isInteger(partNumber) || partNumber < 1) {
+        return new Response('Missing multipart fields', { status: 400 });
+      }
+      const upload = R2.resumeMultipartUpload(filePath, uploadId);
+      const part = await upload.uploadPart(partNumber, request.body);
+      return Response.json(part);
+    }
+
+    if (path === '/api/multipart/complete' && request.method === 'POST') {
+      const { path: filePath, uploadId, parts } = await request.json().catch(() => ({}));
+      if (!filePath || !uploadId || !Array.isArray(parts) || parts.length === 0) {
+        return new Response('Missing multipart fields', { status: 400 });
+      }
+      const upload = R2.resumeMultipartUpload(filePath, uploadId);
+      const object = await upload.complete(parts);
+      return Response.json({ ok: true, key: object.key, etag: object.etag });
+    }
+
+    if (path === '/api/multipart/abort' && request.method === 'POST') {
+      const { path: filePath, uploadId } = await request.json().catch(() => ({}));
+      if (!filePath || !uploadId) return new Response('Missing multipart fields', { status: 400 });
+      const upload = R2.resumeMultipartUpload(filePath, uploadId);
+      await upload.abort();
       return Response.json({ ok: true });
     }
 
