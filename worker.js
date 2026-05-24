@@ -25,6 +25,12 @@
  * 4. 站点标题 (可选)
  *    SITE_TITLE = "My Cloud Drive"
  *
+ * 5. 云盘图标 (可选 - 图片链接)
+ *    CLOUD_ICON_URL = "https://example.com/icon.png"
+ *
+ * 6. 登录页背景图 (可选 - 图片链接，不设置则为淡灰色)
+ *    LOGIN_BACKGROUND_URL = "https://example.com/login-bg.jpg"
+ *
  * ============================================
  * 功能列表
  * ============================================
@@ -111,6 +117,22 @@ function formatDate(date) {
   });
 }
 
+function escapeAttr(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function renderLogoIcon(iconUrl = '', fallbackIcon = 'cloud') {
+  const url = String(iconUrl || '').trim();
+  if (url) {
+    return `<div class="logo-icon logo-icon-custom"><img src="${escapeAttr(url)}" alt=""></div>`;
+  }
+  return `<div class="logo-icon"><span class="material-icons-round">${fallbackIcon}</span></div>`;
+}
+
 function renderHTML(content, title = 'R2 云盘') {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -163,9 +185,6 @@ function renderHTML(content, title = 'R2 云盘') {
     --shadow-2: 0 1px 3px rgba(0,0,0,.3), 0 4px 8px 3px rgba(0,0,0,.15);
     --shadow-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
   }
-  [data-theme="dark"] .logo-icon {
-    background: linear-gradient(135deg, #8AB4F8 0%, #81C995 33%, #FDD663 66%, #F28B82 100%);
-  }
   [data-theme="dark"] .snackbar { background: #3C4043; color: #E8EAED; }
   [data-theme="dark"] .snackbar-action { color: #8AB4F8; }
   [data-theme="dark"] .selection-bar { background: #1A2332; color: #8AB4F8; }
@@ -197,10 +216,17 @@ function renderHTML(content, title = 'R2 云盘') {
   }
   .logo-icon {
     width: 40px; height: 40px;
-    background: linear-gradient(135deg, #4285F4 0%, #34A853 33%, #FBBC04 66%, #EA4335 100%);
+    background: linear-gradient(135deg, #FFB74D 0%, #FB8C00 100%);
     border-radius: 12px;
     display: flex; align-items: center; justify-content: center;
     color: white; font-size: 20px;
+    overflow: hidden; flex-shrink: 0;
+  }
+  .logo-icon .material-icons-round { font-size: inherit; }
+  .logo-icon-custom { background: transparent; }
+  .logo-icon-custom img {
+    width: 100%; height: 100%;
+    display: block; object-fit: cover;
   }
   .app-bar-title {
     font-family: var(--font-display);
@@ -223,6 +249,19 @@ function renderHTML(content, title = 'R2 云盘') {
   .icon-btn:hover { background: rgba(60,64,67,.08); }
   .icon-btn:active { background: rgba(60,64,67,.12); }
   .icon-btn .material-icons-round { font-size: 20px; }
+
+  .theme-ripple {
+    position: fixed; left: 0; top: 0; z-index: 10000;
+    width: 1px; height: 1px; border-radius: 50%;
+    pointer-events: none; transform: translate(-50%, -50%) scale(0);
+    transition: transform .55s cubic-bezier(.4, 0, .2, 1);
+    will-change: transform;
+  }
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+  }
 
   /* ── Layout ── */
   .layout { display: flex; min-height: calc(100vh - 64px); }
@@ -482,12 +521,23 @@ function renderHTML(content, title = 'R2 云盘') {
   /* ── Login ── */
   .login-wrap {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    background: var(--background);
+    background: #F1F3F4;
+    position: relative; overflow: hidden; padding: 24px;
+  }
+  [data-theme="dark"] .login-wrap { background: var(--background); }
+  .login-bg-image {
+    position: absolute; inset: 0; z-index: 0;
+    width: 100%; height: 100%; object-fit: cover;
+  }
+  .login-theme-toggle {
+    position: fixed; top: 24px; right: 24px; z-index: 2;
+    background: var(--surface); box-shadow: var(--shadow-1);
   }
   .login-card {
     background: var(--surface); border-radius: var(--radius-l);
-    padding: 48px 40px; width: 400px;
+    padding: 48px 40px; width: 400px; max-width: 100%;
     box-shadow: var(--shadow-2); text-align: center;
+    position: relative; z-index: 1;
   }
   .login-logo { margin-bottom: 32px; }
   .login-logo .logo-icon { width: 64px; height: 64px; margin: 0 auto 16px; border-radius: 20px; font-size: 32px; }
@@ -519,6 +569,7 @@ function renderHTML(content, title = 'R2 云盘') {
     .main { padding: 16px; }
     .file-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
     .app-bar-title { font-size: 18px; }
+    .login-theme-toggle { top: 16px; right: 16px; }
   }
 
   /* ── Context Menu ── */
@@ -756,21 +807,75 @@ async function checkClipboardFromKV() {
 }
 
 // ── Dark Mode ──
-function toggleDarkMode() {
+function applyDarkMode(isDark) {
   const html = document.documentElement;
-  const isDark = html.getAttribute('data-theme') === 'dark';
-  html.setAttribute('data-theme', isDark ? '' : 'dark');
-  localStorage.setItem('theme', isDark ? '' : 'dark');
-  const icon = document.querySelector('#darkModeToggle .material-icons-round');
-  if (icon) icon.textContent = isDark ? 'dark_mode' : 'light_mode';
+  if (isDark) html.setAttribute('data-theme', 'dark');
+  else html.removeAttribute('data-theme');
+  localStorage.setItem('theme', isDark ? 'dark' : '');
+  document.querySelectorAll('#darkModeToggle .material-icons-round').forEach(icon => {
+    icon.textContent = isDark ? 'light_mode' : 'dark_mode';
+  });
+}
+
+function getThemeRipplePoint(event) {
+  if (event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+    return { x: event.clientX, y: event.clientY };
+  }
+  return { x: window.innerWidth - 48, y: 48 };
+}
+
+function getThemeRippleRadius(x, y) {
+  return Math.hypot(
+    Math.max(x, window.innerWidth - x),
+    Math.max(y, window.innerHeight - y)
+  );
+}
+
+function animateThemeRipple(event, toDark, applyTheme) {
+  const { x, y } = getThemeRipplePoint(event);
+  const radius = getThemeRippleRadius(x, y);
+
+  if (document.startViewTransition) {
+    const transition = document.startViewTransition(applyTheme);
+    transition.ready.then(() => {
+      document.documentElement.animate({
+        clipPath: [
+          'circle(0px at ' + x + 'px ' + y + 'px)',
+          'circle(' + radius + 'px at ' + x + 'px ' + y + 'px)'
+        ]
+      }, {
+        duration: 550,
+        easing: 'cubic-bezier(.4, 0, .2, 1)',
+        pseudoElement: '::view-transition-new(root)'
+      });
+    });
+    return;
+  }
+
+  const ripple = document.createElement('span');
+  const diameter = radius * 2;
+  ripple.className = 'theme-ripple';
+  ripple.style.left = x + 'px';
+  ripple.style.top = y + 'px';
+  ripple.style.width = diameter + 'px';
+  ripple.style.height = diameter + 'px';
+  ripple.style.background = toDark ? '#121212' : '#F1F3F4';
+  document.body.appendChild(ripple);
+
+  requestAnimationFrame(() => {
+    ripple.style.transform = 'translate(-50%, -50%) scale(1)';
+  });
+  window.setTimeout(applyTheme, 500);
+  window.setTimeout(() => ripple.remove(), 620);
+}
+
+function toggleDarkMode(event) {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const toDark = !isDark;
+  animateThemeRipple(event, toDark, () => applyDarkMode(toDark));
 }
 function initDarkMode() {
-  const saved = localStorage.getItem('theme');
-  if (saved === 'dark') {
-    document.documentElement.setAttribute('data-theme', 'dark');
-    const icon = document.querySelector('#darkModeToggle .material-icons-round');
-    if (icon) icon.textContent = 'light_mode';
-  }
+  applyDarkMode(localStorage.getItem('theme') === 'dark');
 }
 
 // ── Clipboard ID (random per browser session, survives navigation) ──
@@ -1063,13 +1168,21 @@ document.addEventListener('DOMContentLoaded', () => {
 </html>`;
 }
 
-function renderLoginPage(error = '') {
+function renderLoginPage(error = '', siteTitle = 'R2 云盘', cloudIconUrl = '', loginBackgroundUrl = '') {
+  const bgUrl = String(loginBackgroundUrl || '').trim();
+  const loginBg = bgUrl
+    ? `<img class="login-bg-image" src="${escapeAttr(bgUrl)}" alt="" aria-hidden="true">`
+    : '';
   return renderHTML(`
 <div class="login-wrap">
+  ${loginBg}
+  <button class="icon-btn login-theme-toggle" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
+    <span class="material-icons-round">dark_mode</span>
+  </button>
   <div class="login-card">
     <div class="login-logo">
-      <div class="logo-icon"><span class="material-icons-round" style="font-size:32px">cloud</span></div>
-      <h1 class="login-title">R2 云盘</h1>
+      ${renderLogoIcon(cloudIconUrl)}
+      <h1 class="login-title">${siteTitle}</h1>
       <p class="login-sub">安全访问您的云端文件</p>
     </div>
     <label class="field-label" for="pwd">访问密码</label>
@@ -1093,11 +1206,11 @@ function login() {
     });
 }
 </script>
-`, 'R2 云盘 - 登录');
+`, siteTitle + ' - 登录');
 }
 
 // ── Shared Folder Page (public, download only) ──
-function renderSharedPage(folders, files, currentPath, siteTitle) {
+function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl = '') {
   const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : [];
   const sharedBase = '/shared';
   const sharedPrefix = SHARED_PREFIX;
@@ -1123,11 +1236,14 @@ function renderSharedPage(folders, files, currentPath, siteTitle) {
   return renderHTML(`
 <header class="app-bar">
   <a class="app-bar-logo" href="${sharedBase}">
-    <div class="logo-icon"><span class="material-icons-round" style="font-size:20px">folder_shared</span></div>
+    ${renderLogoIcon(cloudIconUrl)}
     <span class="app-bar-title">${siteTitle} - 共享</span>
   </a>
   <div class="app-bar-spacer"></div>
   <div class="app-bar-actions">
+    <button class="icon-btn" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
+      <span class="material-icons-round">dark_mode</span>
+    </button>
     <button class="icon-btn" title="登录管理" onclick="location.href='/'">
       <span class="material-icons-round">login</span>
     </button>
@@ -1249,22 +1365,10 @@ function renderSharedPage(folders, files, currentPath, siteTitle) {
   </main>
 </div>
 
-<script>
-// ── View Mode ──
-let viewMode = localStorage.getItem('viewMode') || 'grid';
-function setView(mode) {
-  viewMode = mode; localStorage.setItem('viewMode', mode);
-  document.querySelectorAll('.view-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
-  const grid = document.getElementById('fileGrid');
-  const list = document.getElementById('fileList');
-  if (grid && list) { grid.style.display = mode === 'grid' ? '' : 'none'; list.style.display = mode === 'list' ? '' : 'none'; }
-}
-document.addEventListener('DOMContentLoaded', () => { setView(viewMode); });
-</script>
 `, siteTitle + ' - 共享');
 }
 
-function renderDrivePage(folders, files, currentPath, siteTitle) {
+function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = '') {
   const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : [];
 
   const breadcrumb = `<nav class="breadcrumb">
@@ -1367,12 +1471,12 @@ function renderDrivePage(folders, files, currentPath, siteTitle) {
   return renderHTML(`
 <header class="app-bar">
   <a class="app-bar-logo" href="/">
-    <div class="logo-icon"><span class="material-icons-round" style="font-size:20px">cloud</span></div>
+    ${renderLogoIcon(cloudIconUrl)}
     <span class="app-bar-title">${siteTitle}</span>
   </a>
   <div class="app-bar-spacer"></div>
     <div class="app-bar-actions">
-    <button class="icon-btn" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode()">
+    <button class="icon-btn" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
       <span class="material-icons-round">dark_mode</span>
     </button>
     <button class="icon-btn" title="刷新" onclick="location.reload()">
@@ -1604,6 +1708,8 @@ export default {
     const path = url.pathname;
     const R2 = env.R2_BUCKET;
     const siteTitle = env.SITE_TITLE || 'R2 云盘';
+    const cloudIconUrl = env.CLOUD_ICON_URL || '';
+    const loginBackgroundUrl = env.LOGIN_BACKGROUND_URL || '';
 
     if (!R2) {
       return new Response('未配置 R2 存储桶。请在 wrangler.toml 中绑定 R2_BUCKET。', { status: 500 });
@@ -1611,7 +1717,7 @@ export default {
 
         // ── Auth endpoints ──
     if (path === '/login') {
-      if (request.method === 'GET') return new Response(renderLoginPage(), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+      if (request.method === 'GET') return new Response(renderLoginPage('', siteTitle, cloudIconUrl, loginBackgroundUrl), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
     if (path === '/api/login' && request.method === 'POST') {
@@ -1657,7 +1763,7 @@ export default {
         }))
         .filter(f => f.name && !f.name.includes('/'));
 
-      const html = renderSharedPage(folders, files, subPath, siteTitle);
+      const html = renderSharedPage(folders, files, subPath, siteTitle, cloudIconUrl);
       return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
@@ -1866,7 +1972,7 @@ export default {
         }))
         .filter(f => f.name && !f.name.includes('/'));
 
-      const html = renderDrivePage(folders, files, prefix, siteTitle);
+      const html = renderDrivePage(folders, files, prefix, siteTitle, cloudIconUrl);
       return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
