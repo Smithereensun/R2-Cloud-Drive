@@ -664,6 +664,45 @@ function renderHTML(content, title = 'R2 云盘') {
   }
   [data-theme="dark"] .action-btn:hover { background: rgba(232,234,237,.08); color: var(--on-surface); }
   [data-theme="dark"] .action-btn.danger:hover { background: rgba(242,139,130,.08); }
+  .action-bar.download-only { display: none; }
+  .action-bar.download-only.has-download { display: flex; }
+  .download-progress {
+    display: none; align-items: center; gap: 10px;
+    margin-left: auto; min-width: 260px; max-width: 560px;
+    flex: 1 1 360px; padding: 2px 4px;
+  }
+  .download-progress.open { display: flex; }
+  .download-progress .material-icons-round {
+    font-size: 18px; color: var(--primary); flex: 0 0 auto;
+  }
+  .download-progress-main {
+    display: flex; flex-direction: column; gap: 5px;
+    min-width: 0; flex: 1;
+  }
+  .download-progress-top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; min-width: 0; font-size: 12px;
+  }
+  .download-progress-name {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--on-surface); font-weight: 500;
+  }
+  .download-progress-stats {
+    color: var(--on-surface-variant); white-space: nowrap; flex: 0 0 auto;
+  }
+  .download-progress-bar {
+    height: 6px; border-radius: 999px; overflow: hidden;
+    background: var(--outline);
+  }
+  .download-progress-fill {
+    width: 0%; height: 100%; border-radius: inherit;
+    background: var(--primary); transition: width .15s linear, background .15s;
+  }
+  .download-progress.done .download-progress-fill { background: var(--success); }
+  .download-progress.error .download-progress-fill { background: var(--error); }
+  @media (max-width: 720px) {
+    .download-progress { min-width: 100%; margin-left: 0; }
+  }
 
   .node-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
   .node-row {
@@ -695,6 +734,16 @@ ${content}
 </div>
 
 <div class="context-menu" id="contextMenu">
+  <div class="context-menu-item" onclick="ctxCopy()">
+    <span class="material-icons-round">content_copy</span> 复制
+  </div>
+  <div class="context-menu-item" onclick="ctxCut()">
+    <span class="material-icons-round">content_cut</span> 剪切
+  </div>
+  <div class="context-menu-item" onclick="ctxPaste()">
+    <span class="material-icons-round">content_paste</span> 粘贴
+  </div>
+  <div class="context-menu-divider"></div>
   <div class="context-menu-item" onclick="ctxDownload()">
     <span class="material-icons-round">download</span> 下载
   </div>
@@ -752,6 +801,152 @@ function showSnackbar(msg, action, actionCb) {
 }
 function hideSnackbar() { document.getElementById('snackbar').classList.remove('show'); }
 
+const RANGED_DOWNLOAD_THRESHOLD = 512 * 1024 * 1024;
+const RANGED_DOWNLOAD_CHUNK = 512 * 1024 * 1024;
+const RANGED_DOWNLOAD_RETRIES = 3;
+let activeDownloadId = 0;
+let downloadProgressTimer;
+
+function downloadUrl(path) {
+  return '/api/download?path=' + encodeURIComponent(path);
+}
+
+function getFileSizeByName(name) {
+  for (const el of document.querySelectorAll('[data-name]')) {
+    if (el.dataset.name === name) return Number(el.dataset.size || 0);
+  }
+  return 0;
+}
+
+function downloadProgressElements() {
+  const bar = document.getElementById('actionBar');
+  const panel = document.getElementById('downloadProgress');
+  if (!bar || !panel) return null;
+  return {
+    bar,
+    panel,
+    name: document.getElementById('downloadProgressName'),
+    stats: document.getElementById('downloadProgressStats'),
+    fill: document.getElementById('downloadProgressFill')
+  };
+}
+
+function showDownloadProgress(filename, size) {
+  clearTimeout(downloadProgressTimer);
+  const els = downloadProgressElements();
+  if (!els) return false;
+  els.bar.classList.add('has-download');
+  els.panel.classList.add('open');
+  els.panel.classList.remove('done', 'error');
+  if (els.name) els.name.textContent = filename;
+  if (els.stats) els.stats.textContent = '0% · 0 B / ' + formatSize(size) + ' · 0 B/s';
+  if (els.fill) els.fill.style.width = '0%';
+  return true;
+}
+
+function updateDownloadProgress(filename, downloaded, size, speed) {
+  const els = downloadProgressElements();
+  if (!els) return false;
+  const pct = size > 0 ? Math.min(100, downloaded / size * 100) : 0;
+  if (els.name) els.name.textContent = filename;
+  if (els.stats) {
+    els.stats.textContent = Math.floor(pct) + '% · ' + formatSize(downloaded) + ' / ' + formatSize(size) + ' · ' + formatSize(speed) + '/s';
+  }
+  if (els.fill) els.fill.style.width = pct.toFixed(2) + '%';
+  return true;
+}
+
+function finishDownloadProgress(filename, size, ok) {
+  const els = downloadProgressElements();
+  if (!els) return false;
+  els.panel.classList.toggle('done', ok);
+  els.panel.classList.toggle('error', !ok);
+  if (els.name) els.name.textContent = filename;
+  if (els.stats) els.stats.textContent = ok ? '100% · ' + formatSize(size) + ' · 完成' : '下载失败';
+  if (els.fill) els.fill.style.width = ok ? '100%' : els.fill.style.width;
+  downloadProgressTimer = setTimeout(() => {
+    els.panel.classList.remove('open', 'done', 'error');
+    els.bar.classList.remove('has-download');
+  }, ok ? 2400 : 6000);
+  return true;
+}
+
+async function fetchDownloadRange(path, start, end) {
+  let lastError;
+  for (let attempt = 0; attempt < RANGED_DOWNLOAD_RETRIES; attempt++) {
+    try {
+      const res = await fetch(downloadUrl(path), {
+        headers: { 'Range': 'bytes=' + start + '-' + end }
+      });
+      if (res.status !== 206 || !res.body) throw new Error('range request failed: ' + res.status);
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < RANGED_DOWNLOAD_RETRIES - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function downloadInRanges(path, size) {
+  const filename = path.split('/').pop() || 'download';
+  const downloadId = ++activeDownloadId;
+  let writable;
+  try {
+    const handle = await window.showSaveFilePicker({ suggestedName: filename });
+    writable = await handle.createWritable();
+    showDownloadProgress(filename, size);
+    let downloaded = 0;
+    let lastSpeedBytes = 0;
+    let lastSpeedAt = performance.now();
+    let speed = 0;
+    while (downloaded < size) {
+      const start = downloaded;
+      const end = Math.min(size - 1, start + RANGED_DOWNLOAD_CHUNK - 1);
+      const expected = end - start + 1;
+      const res = await fetchDownloadRange(path, start, end);
+      const reader = res.body.getReader();
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        downloaded += value.byteLength;
+        await writable.write(value);
+        const now = performance.now();
+        const elapsed = (now - lastSpeedAt) / 1000;
+        if (elapsed >= 0.4 || downloaded >= size) {
+          const instantSpeed = (downloaded - lastSpeedBytes) / Math.max(elapsed, 0.001);
+          speed = speed ? speed * 0.65 + instantSpeed * 0.35 : instantSpeed;
+          lastSpeedBytes = downloaded;
+          lastSpeedAt = now;
+          if (downloadId === activeDownloadId) updateDownloadProgress(filename, downloaded, size, speed);
+        }
+      }
+      if (received !== expected) throw new Error('range ended early');
+    }
+    await writable.close();
+    if (downloadId === activeDownloadId) finishDownloadProgress(filename, size, true);
+  } catch (err) {
+    if (writable) await writable.abort().catch(() => {});
+    if (err?.name !== 'AbortError') {
+      console.error(err);
+      if (downloadId === activeDownloadId) finishDownloadProgress(filename, size, false);
+      showSnackbar('Download failed');
+    }
+  }
+}
+
+function startDownload(path, size = 0) {
+  if (size >= RANGED_DOWNLOAD_THRESHOLD && 'showSaveFilePicker' in window) {
+    downloadInRanges(path, size);
+    return;
+  }
+  window.open(downloadUrl(path));
+}
+
 // ── View Mode ──
 function setView(mode) {
   viewMode = mode; localStorage.setItem('viewMode', mode);
@@ -768,7 +963,8 @@ function handleFileClick(event, name) {
     toggleSelect(name, event.currentTarget);
   } else if (event.detail === 2) {
     const path = currentPath ? currentPath + '/' + name : name;
-    window.open('/api/download?path=' + encodeURIComponent(path));
+    const size = Number(event.currentTarget?.dataset.size || getFileSizeByName(name) || 0);
+    startDownload(path, size);
   }
 }
 
@@ -969,37 +1165,42 @@ async function pasteFiles() {
   // Reload clipboard from KV in case of page navigation
   await loadClipboard();
   if (!clipboard.items.length) return;
-  const targetPath = currentPath ? currentPath + '/' : '';
-  const sourceBase = clipboard.sourcePath ? clipboard.sourcePath + '/' : '';
-  for (const name of clipboard.items) {
-    const oldPath = sourceBase + name;
-    // If cutting, move the file; if copying, copy it
-    if (clipboard.action === 'cut') {
-      const finalPath = targetPath + name;
-      // Use rename API
-      try {
-        const res = await fetch('/api/rename', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: oldPath, to: finalPath })
-        });
-        if (!res.ok) showSnackbar('移动失败: ' + name);
-      } catch(e) { showSnackbar('移动失败: ' + name); }
+  const action = clipboard.action || 'copy';
+  const pasteBtn = document.getElementById('pasteBtn');
+  if (pasteBtn) pasteBtn.disabled = true;
+  showSnackbar('正在粘贴 ' + clipboard.items.length + ' 项...');
+
+  try {
+    const res = await fetch('/api/clipboard/paste', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action,
+        items: clipboard.items,
+        sourcePath: clipboard.sourcePath || '',
+        targetPath: currentPath || ''
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'paste failed');
+
+    const results = Array.isArray(data.results) ? data.results : [];
+    const failed = results.filter(item => !item.ok);
+    if (failed.length) {
+      clipboard.items = failed.map(item => item.name).filter(Boolean);
+      await saveClipboard();
+      showSnackbar('操作完成，失败 ' + failed.length + ' 项，正在刷新...');
+      setTimeout(() => location.reload(), 600);
     } else {
-      // Copy: download then upload
-      try {
-        const dlRes = await fetch('/api/download?path=' + encodeURIComponent(oldPath));
-        if (!dlRes.ok) { showSnackbar('复制失败: ' + name); continue; }
-        const blob = await dlRes.blob();
-        const upRes = await fetch('/api/upload?path=' + encodeURIComponent(targetPath + name), { method: 'POST', body: blob });
-        if (!upRes.ok) showSnackbar('复制失败: ' + name);
-      } catch(e) { showSnackbar('复制失败: ' + name); }
+      if (action === 'cut') await clearClipboard();
+      else updateActionBar();
+      showSnackbar('操作完成，正在刷新...');
+      setTimeout(() => location.reload(), 600);
     }
+  } catch(e) {
+    showSnackbar('粘贴失败');
+    updateActionBar();
   }
-  if (clipboard.action === 'cut') {
-    await clearClipboard();
-  }
-  showSnackbar('操作完成', '刷新', () => location.reload());
 }
 
 // ── Rename Selected ──
@@ -1023,11 +1224,11 @@ function downloadSelected() {
   const names = [...selectedFiles];
   if (names.length === 1) {
     const path = currentPath ? currentPath + '/' + names[0] : names[0];
-    window.open('/api/download?path=' + encodeURIComponent(path));
+    startDownload(path, getFileSizeByName(names[0]));
   } else {
     names.forEach(name => {
       const path = currentPath ? currentPath + '/' + name : name;
-      window.open('/api/download?path=' + encodeURIComponent(path));
+      startDownload(path, getFileSizeByName(name));
     });
   }
 }
@@ -1107,10 +1308,38 @@ function showCtxMenu(e, name) {
 document.addEventListener('click', () => document.getElementById('contextMenu')?.classList.remove('open'));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { clearSelection(); document.getElementById('contextMenu')?.classList.remove('open'); } });
 
+function ctxItems() {
+  if (!ctxTarget) return [];
+  if (selectedFiles.has(ctxTarget) && selectedFiles.size > 1) return [...selectedFiles];
+  return [ctxTarget];
+}
+async function ctxCopy() {
+  const items = ctxItems();
+  if (!items.length) return;
+  clipboard.items = items;
+  clipboard.action = 'copy';
+  clipboard.sourcePath = currentPath;
+  await saveClipboard();
+  showSnackbar('已复制 ' + clipboard.items.length + ' 项，请进入目标文件夹后粘贴', '清除', () => clearClipboard());
+  updateActionBar();
+}
+async function ctxCut() {
+  const items = ctxItems();
+  if (!items.length) return;
+  clipboard.items = items;
+  clipboard.action = 'cut';
+  clipboard.sourcePath = currentPath;
+  await saveClipboard();
+  showSnackbar('已剪切 ' + clipboard.items.length + ' 项，请进入目标文件夹后粘贴', '清除', () => clearClipboard());
+  updateActionBar();
+}
+function ctxPaste() {
+  pasteFiles();
+}
 function ctxDownload() {
   if (!ctxTarget) return;
   const path = currentPath ? currentPath + '/' + ctxTarget : ctxTarget;
-  window.open('/api/download?path=' + encodeURIComponent(path));
+  startDownload(path, getFileSizeByName(ctxTarget));
 }
 function ctxRename() {
   if (!ctxTarget) return;
@@ -1355,7 +1584,7 @@ function uploadDistributedPart(partInfo, chunk, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', partInfo.uploadUrl);
-    xhr.setRequestHeader('Authorization', 'Bearer ' + partInfo.token);
+    if (partInfo.token) xhr.setRequestHeader('Authorization', 'Bearer ' + partInfo.token);
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress(e.loaded);
     };
@@ -1397,7 +1626,7 @@ function renderStorageNodes(nodes) {
     '<div class="node-row">' +
       '<div class="node-row-main">' +
         '<div class="node-row-title">' + escapeHtml(node.name || node.id) + '</div>' +
-        '<div class="node-row-sub">' + escapeHtml(node.url) + ' · 权重 ' + (node.weight || 1) + ' · ' + (node.enabled ? '启用' : '停用') + '</div>' +
+        '<div class="node-row-sub">' + escapeHtml(node.url) + ' · ' + (node.enabled ? '启用' : '停用') + '</div>' +
       '</div>' +
       '<button class="icon-btn" title="测试" onclick="testStorageNode(\\'' + node.id + '\\')">' +
         '<span class="material-icons-round">network_check</span>' +
@@ -1415,18 +1644,16 @@ async function saveStorageNode() {
   const name = document.getElementById('nodeNameInput')?.value?.trim();
   const url = document.getElementById('nodeUrlInput')?.value?.trim();
   const token = document.getElementById('nodeTokenInput')?.value?.trim();
-  const weight = document.getElementById('nodeWeightInput')?.value || '1';
   if (!name || !url || !token) { showSnackbar('请填写节点名称、地址和密钥'); return; }
   const res = await fetch('/api/storage-nodes', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name, url, token, weight })
+    body: JSON.stringify({ name, url, token })
   });
   if (!res.ok) { showSnackbar('保存节点失败'); return; }
   document.getElementById('nodeNameInput').value = '';
   document.getElementById('nodeUrlInput').value = '';
   document.getElementById('nodeTokenInput').value = '';
-  document.getElementById('nodeWeightInput').value = '1';
   showSnackbar('节点已保存');
   loadStorageNodes();
 }
@@ -1601,6 +1828,21 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
       </div>
     </div>
 
+    <div class="action-bar download-only" id="actionBar">
+      <div class="download-progress" id="downloadProgress" aria-live="polite">
+        <span class="material-icons-round">downloading</span>
+        <div class="download-progress-main">
+          <div class="download-progress-top">
+            <span class="download-progress-name" id="downloadProgressName"></span>
+            <span class="download-progress-stats" id="downloadProgressStats"></span>
+          </div>
+          <div class="download-progress-bar">
+            <div class="download-progress-fill" id="downloadProgressFill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     ${isEmpty ? `
     <div class="empty-state">
       <span class="material-icons-round">folder_shared</span>
@@ -1623,7 +1865,7 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
             ${files.map(file => {
         const { icon, color } = getFileIcon(file.name);
                 const dlPath = sharedPrefix + '/' + (currentPath ? currentPath + '/' + file.name : file.name);
-        return `<div class="file-card" onclick="window.open('/api/download?path=${encodeURIComponent(dlPath)}')">
+        return `<div class="file-card" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">
           <div class="file-card-icon" style="background:${color}18">
             <span class="material-icons-round" style="color:${color};font-size:32px">${icon}</span>
           </div>
@@ -1666,12 +1908,12 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
             return `<tr>
               <td><div class="file-row-icon">
                 <span class="material-icons-round" style="color:${color};font-size:22px">${icon}</span>
-                <span class="file-row-name" onclick="window.open('/api/download?path=${encodeURIComponent(dlPath)}')">${file.name}</span>
+                <span class="file-row-name" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">${file.name}</span>
               </div></td>
               <td class="file-row-meta">${formatSize(file.size)}</td>
               <td class="file-row-meta">${formatDate(file.uploaded)}</td>
               <td>
-                <button class="icon-btn" title="下载" onclick="window.open('/api/download?path=${encodeURIComponent(dlPath)}')">
+                <button class="icon-btn" title="下载" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">
                   <span class="material-icons-round">download</span>
                 </button>
               </td>
@@ -1726,7 +1968,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     const renderFileCard = (file) => {
     const { icon, color } = getFileIcon(file.name);
     const path = currentPath ? currentPath + '/' + file.name : file.name;
-    return `<div class="file-card" onclick="handleFileClick(event,'${file.name}')"
+    return `<div class="file-card" data-name="${file.name}" data-size="${file.size}" onclick="handleFileClick(event,'${file.name}')"
         oncontextmenu="showCtxMenu(event,'${file.name}')">
       <div class="file-card-icon" style="background:${color}18">
         <span class="material-icons-round" style="color:${color};font-size:32px">${icon}</span>
@@ -1737,7 +1979,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
         <span>${formatDate(file.uploaded)}</span>
       </div>
       <div class="file-card-actions">
-        <button class="icon-btn" title="下载" onclick="event.stopPropagation();window.open('/api/download?path=${encodeURIComponent(path)}')">
+        <button class="icon-btn" title="下载" onclick="event.stopPropagation();startDownload(decodeURIComponent('${encodeURIComponent(path)}'), ${file.size || 0})">
           <span class="material-icons-round">download</span>
         </button>
         <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${file.name}')">
@@ -1775,7 +2017,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <td class="file-row-meta">${formatSize(file.size)}</td>
       <td class="file-row-meta">${formatDate(file.uploaded)}</td>
       <td><div class="file-row-actions">
-        <button class="icon-btn" title="下载" onclick="event.stopPropagation();window.open('/api/download?path=${encodeURIComponent(path)}')">
+        <button class="icon-btn" title="下载" onclick="event.stopPropagation();startDownload(decodeURIComponent('${encodeURIComponent(path)}'), ${file.size || 0})">
           <span class="material-icons-round">download</span>
         </button>
         <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${file.name}')">
@@ -1890,6 +2132,18 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <button class="action-btn danger" onclick="deleteSelected()" title="删除">
         <span class="material-icons-round">delete_outline</span><span>删除</span>
       </button>
+      <div class="download-progress" id="downloadProgress" aria-live="polite">
+        <span class="material-icons-round">downloading</span>
+        <div class="download-progress-main">
+          <div class="download-progress-top">
+            <span class="download-progress-name" id="downloadProgressName"></span>
+            <span class="download-progress-stats" id="downloadProgressStats"></span>
+          </div>
+          <div class="download-progress-bar">
+            <div class="download-progress-fill" id="downloadProgressFill"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     ${isEmpty ? `
@@ -2001,10 +2255,6 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
           <label class="field-label" for="nodeNameInput">节点名称</label>
           <input class="text-field" id="nodeNameInput" type="text" placeholder="账号 A">
         </div>
-        <div>
-          <label class="field-label" for="nodeWeightInput">权重</label>
-          <input class="text-field" id="nodeWeightInput" type="number" min="1" value="1">
-        </div>
         <div class="full">
           <label class="field-label" for="nodeUrlInput">节点 Worker 地址</label>
           <input class="text-field" id="nodeUrlInput" type="url" placeholder="https://node.example.workers.dev">
@@ -2033,12 +2283,21 @@ const STORAGE_TOTAL_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB per account/node
 
 const SESSION_COOKIE = 'r2drive_session';
 const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000;
-const DAV_PREFIX = '/dav';
 const STORAGE_NODES_KV_KEY = 'storage_nodes';
 const MULTIPART_SESSION_PREFIX = 'multipart_session_';
-const NODE_PART_PREFIX = '__r2drive_node_parts/';
+const R2_MULTIPART_SESSION_PREFIX = 'r2multipart_session_';
+const MAIN_STORAGE_NODE_ID = 'main';
+const FS_FILE_PREFIX = 'r2drive:fs:file:';
+const FS_FOLDER_PREFIX = 'r2drive:fs:folder:';
+const FS_DIR_PREFIX = 'r2drive:fs:dir:';
+const NODE_PART_PREFIX = 'r2drive_node_part_';
+const STORAGE_NODE_USAGE_PREFIX = 'storage_node_usage:';
 const MANIFEST_CONTENT_TYPE = 'application/vnd.r2drive.manifest+json';
 const MANIFEST_VERSION = 1;
+const DOWNLOAD_RANGE_SIZE_BYTES = 32 * 1024 * 1024;
+const DOWNLOAD_OUTPUT_CHUNK_BYTES = 256 * 1024;
+const DOWNLOAD_NODE_FETCH_RETRIES = 3;
+const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 100 * 1024 * 1024;
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -2063,34 +2322,21 @@ function getCookie(request, name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-function isWebDavAuthenticated(request, env) {
-  if (!env.ACCESS_PASSWORD) return true;
-  const header = request.headers.get('Authorization') || '';
-  if (!header.startsWith('Basic ')) return false;
-  try {
-    const decoded = atob(header.slice(6));
-    const password = decoded.slice(decoded.indexOf(':') + 1);
-    return password === env.ACCESS_PASSWORD;
-  } catch {
-    return false;
-  }
-}
-
-function webDavAuthRequired() {
-  return new Response('WebDAV authentication required', {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="R2 Cloud Drive WebDAV"',
-      'Content-Type': 'text/plain;charset=UTF-8'
-    }
-  });
-}
-
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { 'Content-Type': 'application/json;charset=UTF-8' }
   });
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getDownloadRangeSize(env) {
+  const configuredMb = Number(env.DOWNLOAD_RANGE_SIZE_MB || 0);
+  const configured = configuredMb > 0 ? configuredMb * 1024 * 1024 : DOWNLOAD_RANGE_SIZE_BYTES;
+  return Math.min(32 * 1024 * 1024, Math.max(1024 * 1024, Math.floor(configured)));
 }
 
 function normalizeNodeUrl(url = '') {
@@ -2104,7 +2350,8 @@ function sanitizeNode(node = {}) {
     url: normalizeNodeUrl(node.url),
     token: String(node.token || '').trim(),
     enabled: node.enabled !== false,
-    weight: Math.max(1, parseInt(node.weight || '1', 10) || 1)
+    weight: Math.max(1, parseInt(node.weight || '1', 10) || 1),
+    createdAt: String(node.createdAt || '').trim()
   };
 }
 
@@ -2114,7 +2361,20 @@ function publicNode(node) {
     name: node.name,
     url: node.url,
     enabled: node.enabled !== false,
-    weight: node.weight || 1
+    weight: node.weight || 1,
+    createdAt: node.createdAt || ''
+  };
+}
+
+function mainStorageNode() {
+  return {
+    id: MAIN_STORAGE_NODE_ID,
+    name: '主控账号',
+    url: '',
+    token: '',
+    enabled: true,
+    createdAt: '1970-01-01T00:00:00.000Z',
+    storageType: 'r2'
   };
 }
 
@@ -2143,14 +2403,665 @@ async function calculateR2Usage(R2) {
   do {
     const listed = await R2.list({ cursor, limit: 1000, include: ['customMetadata'] });
     for (const obj of listed.objects) {
-      const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-      totalUsed += Number.isFinite(manifestSize) ? manifestSize : obj.size;
+      totalUsed += obj.size;
     }
     cursor = listed.cursor;
     safety++;
     if (safety > 100) break;
   } while (cursor);
   return totalUsed;
+}
+
+function publicFileEntry(entry) {
+  return {
+    name: entry.name || virtualPathName(entry.path),
+    size: Number(entry.size || 0),
+    uploaded: entry.uploaded || entry.updatedAt || '',
+    etag: entry.etag || ''
+  };
+}
+
+function requireFsKv(env) {
+  if (!env.CLIPBOARD_KV) throw new Error('CLIPBOARD_KV binding is required for file path mapping');
+  return env.CLIPBOARD_KV;
+}
+
+function normalizeVirtualPath(path = '') {
+  return String(path || '')
+    .replace(/\\/g, '/')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+    .split('/')
+    .filter(Boolean)
+    .join('/');
+}
+
+function assertVirtualPath(path = '', options = {}) {
+  const clean = normalizeVirtualPath(path);
+  if (!clean && !options.allowRoot) throw new Error('invalid path');
+  if (/[\u0000-\u001F]/.test(clean)) throw new Error('invalid path');
+  const parts = clean.split('/').filter(Boolean);
+  if (parts.some(part => part === '.' || part === '..')) throw new Error('invalid path');
+  return clean;
+}
+
+function virtualPathName(path = '') {
+  return normalizeVirtualPath(path).split('/').filter(Boolean).pop() || '';
+}
+
+function virtualParentPath(path = '') {
+  const parts = normalizeVirtualPath(path).split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function joinVirtualPath(base, name) {
+  const cleanBase = normalizeVirtualPath(base);
+  const cleanName = normalizeVirtualPath(name);
+  if (!cleanBase) return cleanName;
+  if (!cleanName) return cleanBase;
+  return cleanBase + '/' + cleanName;
+}
+
+function isVirtualChildPath(path, parent) {
+  const cleanPath = normalizeVirtualPath(path);
+  const cleanParent = normalizeVirtualPath(parent);
+  return !!cleanParent && cleanPath.startsWith(cleanParent + '/');
+}
+
+function fileEntryKey(path = '') {
+  return FS_FILE_PREFIX + normalizeVirtualPath(path);
+}
+
+function folderEntryKey(path = '') {
+  return FS_FOLDER_PREFIX + normalizeVirtualPath(path);
+}
+
+function directoryIndexKey(path = '') {
+  return FS_DIR_PREFIX + normalizeVirtualPath(path);
+}
+
+async function kvGetJson(env, key) {
+  const raw = await requireFsKv(env).get(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function kvPutJson(env, key, data, options) {
+  await requireFsKv(env).put(key, JSON.stringify(data), options);
+}
+
+async function kvListKeys(env, prefix) {
+  const keys = [];
+  let cursor;
+  let safety = 0;
+  do {
+    const listed = await requireFsKv(env).list({ prefix, cursor, limit: 1000 });
+    keys.push(...(listed.keys || []).map(item => item.name));
+    cursor = listed.cursor;
+    safety++;
+    if (safety > 1000) throw new Error('too many KV list pages');
+  } while (cursor);
+  return keys;
+}
+
+function normalizeDirectoryIndex(index, path = '') {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  const folderNames = new Set(Array.isArray(index?.folders) ? index.folders.map(normalizeVirtualPath).filter(name => name && !name.includes('/')) : []);
+  const fileMap = new Map();
+  if (Array.isArray(index?.files)) {
+    for (const file of index.files) {
+      const name = normalizeVirtualPath(file?.name || '');
+      if (!name || name.includes('/')) continue;
+      fileMap.set(name, {
+        name,
+        size: Number(file.size || 0),
+        uploaded: file.uploaded || '',
+        etag: file.etag || ''
+      });
+    }
+  }
+  return {
+    version: 1,
+    path: clean,
+    folders: [...folderNames].sort((a, b) => a.localeCompare(b, 'zh-CN')),
+    files: [...fileMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
+    updatedAt: index?.updatedAt || new Date().toISOString()
+  };
+}
+
+async function putDirectoryIndex(env, path, index) {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  await kvPutJson(env, directoryIndexKey(clean), normalizeDirectoryIndex({
+    ...index,
+    updatedAt: new Date().toISOString()
+  }, clean));
+}
+
+async function rebuildDirectoryIndexFromKv(env, path = '') {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  const folderPrefix = FS_FOLDER_PREFIX + (clean ? clean + '/' : '');
+  const filePrefix = FS_FILE_PREFIX + (clean ? clean + '/' : '');
+
+  const folderNames = new Set();
+  for (const key of await kvListKeys(env, folderPrefix)) {
+    const relative = key.slice(folderPrefix.length);
+    if (relative && !relative.includes('/')) folderNames.add(relative);
+  }
+
+  const fileKeys = [];
+  for (const key of await kvListKeys(env, filePrefix)) {
+    const relative = key.slice(filePrefix.length);
+    if (relative && !relative.includes('/')) fileKeys.push(key);
+  }
+
+  const files = (await Promise.all(fileKeys.map(key => kvGetJson(env, key))))
+    .filter(entry => entry?.type === 'file')
+    .map(publicFileEntry);
+
+  const index = normalizeDirectoryIndex({ folders: [...folderNames], files }, clean);
+  await putDirectoryIndex(env, clean, index);
+  return index;
+}
+
+async function getDirectoryIndex(env, path = '') {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  const index = await kvGetJson(env, directoryIndexKey(clean));
+  if (index?.version === 1) return normalizeDirectoryIndex(index, clean);
+  return rebuildDirectoryIndexFromKv(env, clean);
+}
+
+async function mutateDirectoryIndex(env, path, mutator) {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  const index = await getDirectoryIndex(env, clean);
+  mutator(index);
+  await putDirectoryIndex(env, clean, index);
+}
+
+async function addFolderToDirectoryIndex(env, folderPath) {
+  const clean = assertVirtualPath(folderPath);
+  const parent = virtualParentPath(clean);
+  const name = virtualPathName(clean);
+  await mutateDirectoryIndex(env, parent, index => {
+    if (!index.folders.includes(name)) index.folders.push(name);
+  });
+  if (!await kvGetJson(env, directoryIndexKey(clean))) {
+    await putDirectoryIndex(env, clean, { folders: [], files: [] });
+  }
+}
+
+async function removeFolderFromDirectoryIndex(env, folderPath) {
+  const clean = assertVirtualPath(folderPath);
+  const parent = virtualParentPath(clean);
+  const name = virtualPathName(clean);
+  await mutateDirectoryIndex(env, parent, index => {
+    index.folders = index.folders.filter(item => item !== name);
+  });
+}
+
+async function addFileToDirectoryIndex(env, entry) {
+  const clean = assertVirtualPath(entry.path);
+  const parent = virtualParentPath(clean);
+  const file = publicFileEntry({ ...entry, path: clean });
+  await mutateDirectoryIndex(env, parent, index => {
+    index.files = index.files.filter(item => item.name !== file.name);
+    index.files.push(file);
+  });
+}
+
+async function removeFileFromDirectoryIndex(env, filePath) {
+  const clean = assertVirtualPath(filePath);
+  const parent = virtualParentPath(clean);
+  const name = virtualPathName(clean);
+  await mutateDirectoryIndex(env, parent, index => {
+    index.files = index.files.filter(item => item.name !== name);
+  });
+}
+
+async function deleteDirectoryIndex(env, path) {
+  const clean = assertVirtualPath(path);
+  await requireFsKv(env).delete(directoryIndexKey(clean));
+}
+
+async function getFileEntry(env, path) {
+  const clean = assertVirtualPath(path);
+  const entry = await kvGetJson(env, fileEntryKey(clean));
+  return entry?.type === 'file' && entry.storageKey ? { ...entry, path: clean, name: entry.name || virtualPathName(clean) } : null;
+}
+
+async function getFolderEntry(env, path) {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  if (!clean) return { type: 'folder', path: '', name: '', createdAt: '' };
+  const entry = await kvGetJson(env, folderEntryKey(clean));
+  return entry?.type === 'folder' ? { ...entry, path: clean, name: entry.name || virtualPathName(clean) } : null;
+}
+
+async function ensureFolderHierarchy(env, folderPath = '') {
+  const clean = assertVirtualPath(folderPath, { allowRoot: true });
+  if (!clean) return;
+  const parts = clean.split('/').filter(Boolean);
+  let current = '';
+  for (const part of parts) {
+    current = current ? current + '/' + part : part;
+    if (await getFileEntry(env, current)) throw new Error('parent path is a file');
+    const existing = await getFolderEntry(env, current);
+    if (!existing) {
+      const now = new Date().toISOString();
+      await kvPutJson(env, folderEntryKey(current), {
+        type: 'folder',
+        path: current,
+        name: virtualPathName(current),
+        createdAt: now,
+        updatedAt: now
+      });
+      await addFolderToDirectoryIndex(env, current);
+    }
+  }
+}
+
+async function putFolderEntry(env, path) {
+  const clean = assertVirtualPath(path);
+  if (await getFileEntry(env, clean)) throw new Error('path exists as file');
+  await ensureFolderHierarchy(env, virtualParentPath(clean));
+  const now = new Date().toISOString();
+  const existing = await getFolderEntry(env, clean);
+  await kvPutJson(env, folderEntryKey(clean), {
+    type: 'folder',
+    path: clean,
+    name: virtualPathName(clean),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  });
+  await addFolderToDirectoryIndex(env, clean);
+}
+
+function manifestSizeFromMetadata(meta) {
+  const manifestSize = meta?.customMetadata?.r2driveSize ? parseInt(meta.customMetadata.r2driveSize, 10) : null;
+  return Number.isFinite(manifestSize) ? manifestSize : null;
+}
+
+function fileEntryFromR2Meta(path, storageKey, meta, overrides = {}) {
+  const clean = assertVirtualPath(path);
+  const size = Number.isFinite(Number(overrides.size))
+    ? Number(overrides.size)
+    : (manifestSizeFromMetadata(meta) ?? Number(meta?.size || 0));
+  const uploaded = overrides.uploaded || (meta?.uploaded ? new Date(meta.uploaded).toISOString() : new Date().toISOString());
+  return {
+    type: 'file',
+    path: clean,
+    name: virtualPathName(clean),
+    storageKey,
+    size,
+    uploaded,
+    contentType: overrides.contentType || meta?.httpMetadata?.contentType || getMimeType(clean),
+    etag: overrides.etag || meta?.etag || '',
+    storageType: overrides.storageType || (hasManifestMetadata(meta) ? 'distributed' : 'r2'),
+    createdAt: overrides.createdAt || uploaded,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function putFileEntry(env, entry) {
+  const clean = assertVirtualPath(entry.path);
+  if (await getFolderEntry(env, clean)) throw new Error('path exists as folder');
+  await ensureFolderHierarchy(env, virtualParentPath(clean));
+  const stored = {
+    ...entry,
+    type: 'file',
+    path: clean,
+    name: virtualPathName(clean),
+    updatedAt: new Date().toISOString()
+  };
+  await kvPutJson(env, fileEntryKey(clean), stored);
+  await addFileToDirectoryIndex(env, stored);
+}
+
+function safeStorageName(name = 'file') {
+  const clean = String(name || 'file')
+    .replace(/[\/\\\u0000-\u001F]/g, '_')
+    .replace(/^\.{1,2}$/, '_')
+    .trim();
+  return (clean || 'file').slice(0, 160);
+}
+
+async function hasStorageReference(env, storageKey, excludingPaths = new Set()) {
+  if (!storageKey) return false;
+  const entries = await listAllFileEntries(env, '');
+  for (const entry of entries) {
+    if (entry?.storageKey === storageKey && !excludingPaths.has(normalizeVirtualPath(entry.path))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function createStorageKeyForPath(env, R2, logicalPath, prefix = 'file') {
+  const baseName = safeStorageName(virtualPathName(logicalPath) || prefix);
+  if (!await R2.head(baseName) && !await hasStorageReference(env, baseName)) return baseName;
+
+  for (let i = 0; i < 10; i++) {
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const key = safeStorageName(prefix + '_' + id + '_' + baseName);
+    if (!await R2.head(key) && !await hasStorageReference(env, key)) return key;
+  }
+  return safeStorageName(prefix + '_' + Date.now() + '_' + baseName);
+}
+
+async function cleanupUnreferencedStorage(env, R2, entry) {
+  if (!entry?.storageKey) return;
+  if (await hasStorageReference(env, entry.storageKey)) return;
+
+  const obj = await R2.get(entry.storageKey);
+  const manifest = await readManifestObject(obj);
+  if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
+  await R2.delete(entry.storageKey);
+}
+
+async function replaceFileEntry(env, R2, entry) {
+  const clean = assertVirtualPath(entry.path);
+  const existing = await getFileEntry(env, clean);
+  await putFileEntry(env, entry);
+  if (existing && existing.storageKey !== entry.storageKey) {
+    await cleanupUnreferencedStorage(env, R2, existing);
+  }
+}
+
+async function listDirectory(env, path = '') {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  const index = await getDirectoryIndex(env, clean);
+  return {
+    folders: index.folders,
+    files: index.files
+  };
+}
+
+async function listAllFileEntries(env, folderPath = '') {
+  const clean = assertVirtualPath(folderPath, { allowRoot: true });
+  const index = await getDirectoryIndex(env, clean);
+  const directFiles = await Promise.all(index.files.map(file => getFileEntry(env, joinVirtualPath(clean, file.name))));
+  const nestedFiles = [];
+  for (const folder of index.folders) {
+    nestedFiles.push(...await listAllFileEntries(env, joinVirtualPath(clean, folder)));
+  }
+  return [
+    ...directFiles.filter(Boolean),
+    ...nestedFiles
+  ].map(entry => ({ ...entry, path: normalizeVirtualPath(entry.path), name: entry.name || virtualPathName(entry.path) }));
+}
+
+async function listFolderPaths(env, folderPath = '') {
+  const clean = assertVirtualPath(folderPath, { allowRoot: true });
+  const index = await getDirectoryIndex(env, clean);
+  const folders = [];
+  for (const folder of index.folders) {
+    const childPath = joinVirtualPath(clean, folder);
+    folders.push(childPath, ...await listFolderPaths(env, childPath));
+  }
+  return folders;
+}
+
+async function getVirtualPathSource(env, path, allowMissing = false) {
+  const clean = assertVirtualPath(path, { allowRoot: true });
+  if (!clean) {
+    if (allowMissing) return { type: 'missing', path: '', files: [], folders: [] };
+    throw new Error('invalid path');
+  }
+
+  const file = await getFileEntry(env, clean);
+  if (file) return { type: 'file', path: clean, file, files: [file], folders: [] };
+
+  const folder = await getFolderEntry(env, clean);
+  const files = await listAllFileEntries(env, clean);
+  const childFolders = await listFolderPaths(env, clean);
+  if (folder || files.length || childFolders.length) {
+    return { type: 'folder', path: clean, folders: [clean, ...childFolders], files };
+  }
+
+  if (allowMissing) return { type: 'missing', path: clean, files: [], folders: [] };
+  throw new Error('not found');
+}
+
+function assertVirtualOperationAllowed(source, to) {
+  const cleanTo = assertVirtualPath(to);
+  if (cleanTo === source.path) throw new Error('source and destination are the same');
+  if (source.type === 'folder' && isVirtualChildPath(cleanTo, source.path)) {
+    throw new Error('cannot copy or move a folder into itself');
+  }
+  return cleanTo;
+}
+
+function rebaseVirtualPath(path, fromRoot, toRoot) {
+  const cleanPath = normalizeVirtualPath(path);
+  const cleanFrom = normalizeVirtualPath(fromRoot);
+  const cleanTo = normalizeVirtualPath(toRoot);
+  const relative = cleanPath === cleanFrom ? '' : cleanPath.slice(cleanFrom.length + 1);
+  return joinVirtualPath(cleanTo, relative);
+}
+
+async function copyVirtualPath(env, R2, from, to) {
+  const source = await getVirtualPathSource(env, from);
+  const target = assertVirtualOperationAllowed(source, to);
+
+  if (source.type === 'file') {
+    if (await getFolderEntry(env, target)) throw new Error('destination is a folder');
+    await replaceFileEntry(env, R2, {
+      ...source.file,
+      path: target,
+      name: virtualPathName(target),
+      copiedAt: new Date().toISOString()
+    });
+    return { type: 'file', copied: 1 };
+  }
+
+  if (await getFileEntry(env, target)) throw new Error('destination is a file');
+  await putFolderEntry(env, target);
+
+  const folders = source.folders
+    .map(folder => rebaseVirtualPath(folder, source.path, target))
+    .filter(folder => folder !== target)
+    .sort((a, b) => a.length - b.length);
+  for (const folder of folders) await putFolderEntry(env, folder);
+
+  for (const file of source.files) {
+    const targetPath = rebaseVirtualPath(file.path, source.path, target);
+    if (await getFolderEntry(env, targetPath)) throw new Error('destination is a folder');
+    await replaceFileEntry(env, R2, {
+      ...file,
+      path: targetPath,
+      name: virtualPathName(targetPath),
+      copiedAt: new Date().toISOString()
+    });
+  }
+
+  return { type: 'folder', copied: source.files.length };
+}
+
+async function moveVirtualPath(env, R2, from, to) {
+  const source = await getVirtualPathSource(env, from);
+  const target = assertVirtualOperationAllowed(source, to);
+
+  if (source.type === 'file') {
+    if (await getFolderEntry(env, target)) throw new Error('destination is a folder');
+    const overwritten = await getFileEntry(env, target);
+    await putFileEntry(env, {
+      ...source.file,
+      path: target,
+      name: virtualPathName(target),
+      movedAt: new Date().toISOString()
+    });
+    await requireFsKv(env).delete(fileEntryKey(source.path));
+    await removeFileFromDirectoryIndex(env, source.path);
+    if (overwritten && overwritten.storageKey !== source.file.storageKey) {
+      await cleanupUnreferencedStorage(env, R2, overwritten);
+    }
+    return { type: 'file', moved: 1 };
+  }
+
+  if (await getFileEntry(env, target)) throw new Error('destination is a file');
+
+  const overwritten = [];
+  await putFolderEntry(env, target);
+  const folders = source.folders
+    .map(folder => rebaseVirtualPath(folder, source.path, target))
+    .filter(folder => folder !== target)
+    .sort((a, b) => a.length - b.length);
+  for (const folder of folders) await putFolderEntry(env, folder);
+
+  for (const file of source.files) {
+    const targetPath = rebaseVirtualPath(file.path, source.path, target);
+    if (await getFolderEntry(env, targetPath)) throw new Error('destination is a folder');
+    const existing = await getFileEntry(env, targetPath);
+    if (existing) overwritten.push(existing);
+    await putFileEntry(env, {
+      ...file,
+      path: targetPath,
+      name: virtualPathName(targetPath),
+      movedAt: new Date().toISOString()
+    });
+  }
+
+  for (const file of source.files) {
+    await requireFsKv(env).delete(fileEntryKey(file.path));
+    await removeFileFromDirectoryIndex(env, file.path);
+  }
+  for (const folder of source.folders.sort((a, b) => b.length - a.length)) {
+    await requireFsKv(env).delete(folderEntryKey(folder));
+    await removeFolderFromDirectoryIndex(env, folder);
+    await deleteDirectoryIndex(env, folder);
+  }
+  for (const entry of overwritten) await cleanupUnreferencedStorage(env, R2, entry);
+
+  return { type: 'folder', moved: source.files.length };
+}
+
+async function deleteVirtualPath(env, R2, path) {
+  const source = await getVirtualPathSource(env, path, true);
+  if (source.type === 'missing') return { deleted: 0 };
+
+  const deletedEntries = source.files;
+  if (source.type === 'file') {
+    await requireFsKv(env).delete(fileEntryKey(source.path));
+    await removeFileFromDirectoryIndex(env, source.path);
+  } else {
+    for (const file of source.files) {
+      await requireFsKv(env).delete(fileEntryKey(file.path));
+      await removeFileFromDirectoryIndex(env, file.path);
+    }
+    for (const folder of source.folders.sort((a, b) => b.length - a.length)) {
+      await requireFsKv(env).delete(folderEntryKey(folder));
+      await removeFolderFromDirectoryIndex(env, folder);
+      await deleteDirectoryIndex(env, folder);
+    }
+  }
+
+  const uniqueByStorage = new Map();
+  for (const entry of deletedEntries) {
+    if (entry.storageKey && !uniqueByStorage.has(entry.storageKey)) uniqueByStorage.set(entry.storageKey, entry);
+  }
+  for (const entry of uniqueByStorage.values()) await cleanupUnreferencedStorage(env, R2, entry);
+
+  return { deleted: deletedEntries.length };
+}
+
+function storageNodeUsageKey(nodeId) {
+  return STORAGE_NODE_USAGE_PREFIX + String(nodeId || '').trim();
+}
+
+async function getStoredNodeUsage(env, nodeId) {
+  const data = await kvGetJson(env, storageNodeUsageKey(nodeId));
+  const used = Number(data?.used || 0);
+  return Number.isFinite(used) && used > 0 ? used : 0;
+}
+
+async function adjustStoredNodeUsages(env, deltas) {
+  await Promise.all([...deltas.entries()].map(async ([nodeId, delta]) => {
+    if (!nodeId || !Number.isFinite(delta) || delta === 0) return;
+    const current = await getStoredNodeUsage(env, nodeId);
+    await kvPutJson(env, storageNodeUsageKey(nodeId), {
+      used: Math.max(0, current + delta),
+      updatedAt: new Date().toISOString()
+    });
+  }));
+}
+
+function manifestNodeUsageDeltas(parts, sign = 1, preservedPartIds = new Set()) {
+  const deltas = new Map();
+  for (const part of parts || []) {
+    if (preservedPartIds.has(manifestPartId(part))) continue;
+    const nodeId = part.nodeId || '';
+    const size = Math.max(0, Number(part.size || 0));
+    if (!nodeId || !size) continue;
+    deltas.set(nodeId, (deltas.get(nodeId) || 0) + sign * size);
+  }
+  return deltas;
+}
+
+async function getStorageNodeUsages(env, nodes) {
+  const usages = await Promise.all(nodes.map(async (node, index) => {
+    try {
+      if (node.id === MAIN_STORAGE_NODE_ID || node.storageType === 'r2') {
+        const used = Math.max(await calculateR2Usage(env.R2_BUCKET), await getStoredNodeUsage(env, MAIN_STORAGE_NODE_ID).catch(() => 0));
+        return {
+          node: { ...node, id: MAIN_STORAGE_NODE_ID, name: node.name || '主控账号', storageType: 'r2' },
+          index,
+          used,
+          total: STORAGE_TOTAL_BYTES,
+          assigned: 0
+        };
+      }
+      const res = await fetch(node.url + '/api/node/storage?key=storage', {
+        headers: getNodeAuthHeaders(node)
+      });
+      if (!res.ok) throw new Error('storage unavailable');
+      const data = await res.json();
+      const estimatedUsed = await getStoredNodeUsage(env, node.id).catch(() => 0);
+      return {
+        node,
+        index,
+        used: Math.max(0, Number(data.used || 0), estimatedUsed),
+        total: Math.max(1, Number(data.total || STORAGE_TOTAL_BYTES)),
+        assigned: 0
+      };
+    } catch {
+      return null;
+    }
+  }));
+  return usages.filter(Boolean);
+}
+
+function nearlyEqualNumber(a, b) {
+  return Math.abs(a - b) < 0.000001;
+}
+
+function chooseBalancedNode(usages) {
+  return [...usages].sort((a, b) => {
+    const aRatio = (a.used + a.assigned) / a.total;
+    const bRatio = (b.used + b.assigned) / b.total;
+    if (!nearlyEqualNumber(aRatio, bRatio)) return aRatio - bRatio;
+    const aBytes = a.used + a.assigned;
+    const bBytes = b.used + b.assigned;
+    if (aBytes !== bBytes) return aBytes - bBytes;
+    const aCreated = Date.parse(a.node.createdAt || '') || 0;
+    const bCreated = Date.parse(b.node.createdAt || '') || 0;
+    if (aCreated !== bCreated) return bCreated - aCreated;
+    return a.index - b.index;
+  })[0];
+}
+
+async function allocateDistributedParts(env, nodes, partSizes) {
+  const usages = await getStorageNodeUsages(env, nodes);
+  if (!usages.length) throw new Error('no available storage nodes');
+
+  return partSizes.map(size => {
+    const usage = chooseBalancedNode(usages);
+    usage.assigned += size;
+    return usage.node;
+  });
 }
 
 function getNodeAuthHeaders(node, extra = {}) {
@@ -2171,16 +3082,22 @@ function nodeCorsHeaders(extra = {}) {
   return {
     ...extra,
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Methods': 'GET, HEAD, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
     'Access-Control-Max-Age': '86400'
   };
 }
 
+function hasManifestMetadata(obj) {
+  if (!obj) return false;
+  const contentType = obj.httpMetadata?.contentType || '';
+  return contentType === MANIFEST_CONTENT_TYPE || obj.customMetadata?.r2driveManifest === '1';
+}
+
 async function readManifestObject(obj) {
   if (!obj) return null;
-  const contentType = obj.httpMetadata?.contentType || '';
-  if (contentType !== MANIFEST_CONTENT_TYPE && obj.customMetadata?.r2driveManifest !== '1') return null;
+  if (!hasManifestMetadata(obj) || !obj.body) return null;
   try {
     return await new Response(obj.body).json();
   } catch {
@@ -2192,64 +3109,320 @@ function isManifestFile(manifest) {
   return manifest && manifest.type === 'distributed-file' && Array.isArray(manifest.parts);
 }
 
+function manifestPartsSize(manifest) {
+  return (manifest?.parts || []).reduce((sum, part) => sum + Math.max(0, Number(part.size) || 0), 0);
+}
+
+function manifestSize(manifest) {
+  if (Array.isArray(manifest?.parts)) return manifestPartsSize(manifest);
+  const size = Number(manifest?.size);
+  if (Number.isFinite(size) && size >= 0) return size;
+  return 0;
+}
+
+function manifestPartId(part) {
+  return [part?.storageType || '', part?.nodeId || '', part?.nodeUrl || '', part?.key || ''].join('\x1f');
+}
+
+function manifestPartIds(manifest) {
+  if (!isManifestFile(manifest)) return [];
+  return manifest.parts.map(manifestPartId).filter(Boolean);
+}
+
+function parseByteRange(rangeHeader, size) {
+  if (!rangeHeader) return null;
+  const match = String(rangeHeader).trim().match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match || match[1] === '' && match[2] === '') return { invalid: true };
+
+  let start;
+  let end;
+  if (match[1] === '') {
+    const suffixLength = Number(match[2]);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0 || size <= 0) return { invalid: true };
+    start = Math.max(size - suffixLength, 0);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === '' ? size - 1 : Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
+      return { invalid: true };
+    }
+    end = Math.min(end, size - 1);
+  }
+
+  return { start, end, length: end - start + 1 };
+}
+
+function rangeNotSatisfiableResponse(size, baseHeaders = {}) {
+  const headers = new Headers(baseHeaders);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Content-Range', `bytes */${size}`);
+  headers.set('Content-Type', 'text/plain;charset=UTF-8');
+  headers.set('Content-Length', '21');
+  return new Response('Range Not Satisfiable', { status: 416, headers });
+}
+
+function fileResponseHeaders({ baseHeaders = {}, contentType, filename, size, etag, range }) {
+  const headers = new Headers(baseHeaders);
+  headers.set('Content-Type', contentType || 'application/octet-stream');
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Content-Length', String(range ? range.length : size));
+  headers.set('Cache-Control', 'no-transform');
+  headers.set('Content-Encoding', 'identity');
+  if (range) headers.set('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+  if (filename) headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  if (etag) headers.set('ETag', etag);
+  return headers;
+}
+
+function r2RangeOptions(range) {
+  return range ? { range: { offset: range.start, length: range.length } } : undefined;
+}
+
+async function r2ObjectResponse(request, R2, key, meta, options = {}) {
+  const size = Math.max(0, Number(meta?.size) || 0);
+  const range = parseByteRange(request.headers.get('Range'), size);
+  if (range?.invalid) return rangeNotSatisfiableResponse(size, options.baseHeaders);
+  const obj = request.method === 'HEAD' ? null : await R2.get(key, r2RangeOptions(range));
+  if (request.method !== 'HEAD' && !obj) return new Response('File not found', { status: 404 });
+  const headers = fileResponseHeaders({
+    baseHeaders: options.baseHeaders,
+    contentType: options.contentType || meta?.httpMetadata?.contentType || getMimeType(key),
+    filename: options.filename,
+    size,
+    etag: meta?.etag,
+    range
+  });
+  return new Response(request.method === 'HEAD' ? null : obj.body, {
+    status: range ? 206 : 200,
+    headers
+  });
+}
+
+async function manifestResponse(request, manifest, env, options = {}) {
+  const size = manifestSize(manifest);
+  const declaredSize = Number(manifest?.size);
+  if (Number.isFinite(declaredSize) && declaredSize >= 0 && declaredSize !== size) {
+    const headers = new Headers(options.baseHeaders);
+    headers.set('Content-Type', 'text/plain;charset=UTF-8');
+    headers.set('Content-Length', '22');
+    return new Response('Manifest size mismatch', { status: 500, headers });
+  }
+  const range = parseByteRange(request.headers.get('Range'), size);
+  if (range?.invalid) return rangeNotSatisfiableResponse(size, options.baseHeaders);
+  const headers = fileResponseHeaders({
+    baseHeaders: options.baseHeaders,
+    contentType: manifest.contentType || options.contentType,
+    filename: options.filename,
+    size,
+    range
+  });
+  const body = request.method === 'HEAD' ? null : await streamManifestFile(manifest, env, options.R2, range);
+  return new Response(body, {
+    status: range ? 206 : 200,
+    headers
+  });
+}
+
+async function storedFileResponse(request, R2, key, env, options = {}) {
+  const meta = await R2.head(key);
+  if (!meta) return new Response(options.notFoundText || 'File not found', { status: 404 });
+
+  if (hasManifestMetadata(meta)) {
+    const obj = await R2.get(key);
+    const manifest = await readManifestObject(obj);
+    if (isManifestFile(manifest)) {
+      return manifestResponse(request, manifest, env, {
+        ...options,
+        R2,
+        contentType: manifest.contentType || options.contentType || getMimeType(key)
+      });
+    }
+  }
+
+  return r2ObjectResponse(request, R2, key, meta, {
+    ...options,
+    contentType: options.contentType || getMimeType(key)
+  });
+}
+
+async function storedVirtualFileResponse(request, R2, path, env, options = {}) {
+  const clean = assertVirtualPath(path);
+  const entry = await getFileEntry(env, clean);
+  if (!entry) return new Response(options.notFoundText || 'File not found', { status: 404 });
+  return storedFileResponse(request, R2, entry.storageKey, env, {
+    ...options,
+    filename: options.filename || entry.name || virtualPathName(clean),
+    contentType: options.contentType || entry.contentType || getMimeType(clean)
+  });
+}
+
 async function resolveManifestParts(manifest, env) {
   const nodes = await getStorageNodes(env, true);
   const nodeMap = new Map(nodes.map(node => [node.id, node]));
   return [...manifest.parts].sort((a, b) => a.partNumber - b.partNumber).map(part => {
+    if (part.storageType === 'r2' || part.nodeId === MAIN_STORAGE_NODE_ID) {
+      return {
+        ...part,
+        storageType: 'r2',
+        nodeId: MAIN_STORAGE_NODE_ID,
+        nodeName: part.nodeName || '主控账号'
+      };
+    }
     const node = nodeMap.get(part.nodeId);
     return {
       ...part,
+      storageType: 'node',
       nodeUrl: part.nodeUrl || node?.url,
       token: part.token || node?.token
     };
   });
 }
 
-async function fetchNodePart(part) {
-  if (!part.nodeUrl || !part.token) throw new Error('missing node credentials');
-  const res = await fetch(part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key), {
-    headers: { 'Authorization': 'Bearer ' + part.token }
-  });
-  if (!res.ok || !res.body) throw new Error('failed to fetch node part');
-  return res.body;
+async function fetchR2PartBytes(R2, part, range) {
+  if (!R2) throw new Error('missing R2 binding');
+  const obj = await R2.get(part.key, r2RangeOptions(range));
+  if (!obj) throw new Error('main part not found');
+  const bytes = new Uint8Array(await obj.arrayBuffer());
+  if (bytes.byteLength !== range.length) {
+    throw new Error(`main part range ended at ${bytes.byteLength}/${range.length} bytes`);
+  }
+  return bytes;
 }
 
-function concatStreams(streams) {
-  return new ReadableStream({
-    async start(controller) {
-      try {
-        for (const stream of streams) {
-          const reader = stream.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            controller.enqueue(value);
-          }
+async function fetchNodePartBytes(part, range) {
+  if (!part.nodeUrl || !part.token) throw new Error('missing node credentials');
+  let lastError;
+  for (let attempt = 0; attempt < DOWNLOAD_NODE_FETCH_RETRIES; attempt++) {
+    try {
+      const res = await fetch(part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key), {
+        headers: {
+          'Authorization': 'Bearer ' + part.token,
+          'Range': `bytes=${range.start}-${range.end}`
         }
-        controller.close();
+      });
+      if (!res.ok || !res.body) throw new Error(`failed to fetch node part: ${res.status}`);
+      if (res.status !== 206) throw new Error('storage node does not support ranged downloads');
+
+      const declaredLength = Number(res.headers.get('Content-Length') || 0);
+      if (declaredLength > 0 && declaredLength !== range.length) {
+        throw new Error(`node part range length mismatch: ${declaredLength}/${range.length}`);
+      }
+
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.byteLength !== range.length) {
+        throw new Error(`node part range ended at ${bytes.byteLength}/${range.length} bytes`);
+      }
+      return bytes;
+    } catch (err) {
+      lastError = err;
+      if (attempt < DOWNLOAD_NODE_FETCH_RETRIES - 1) await delay(250 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+function buildManifestSegments(parts, byteRange, segmentSize) {
+  const segments = [];
+  let offset = 0;
+  for (const part of parts) {
+    const partSize = Math.max(0, Number(part.size) || 0);
+    const partStart = offset;
+    const partEnd = partStart + partSize - 1;
+    offset += partSize;
+    if (partSize <= 0) continue;
+
+    const targetStart = byteRange ? byteRange.start : partStart;
+    const targetEnd = byteRange ? byteRange.end : partEnd;
+    if (partEnd < targetStart || partStart > targetEnd) continue;
+
+    let relativeStart = Math.max(0, targetStart - partStart);
+    const relativeEnd = Math.min(partSize - 1, targetEnd - partStart);
+    while (relativeStart <= relativeEnd) {
+      const end = Math.min(relativeEnd, relativeStart + segmentSize - 1);
+      segments.push({
+        part,
+        range: {
+          start: relativeStart,
+          end,
+          length: end - relativeStart + 1
+        }
+      });
+      relativeStart = end + 1;
+    }
+  }
+  return segments;
+}
+
+async function fetchManifestSegmentBytes(R2, part, range) {
+  if (part.storageType === 'r2' || part.nodeId === MAIN_STORAGE_NODE_ID) {
+    return fetchR2PartBytes(R2, part, range);
+  }
+  return fetchNodePartBytes(part, range);
+}
+
+function concatManifestPartStreams(parts, R2, byteRange = null, segmentSize = DOWNLOAD_RANGE_SIZE_BYTES) {
+  const segments = buildManifestSegments(parts, byteRange, segmentSize);
+  let cancelled = false;
+  let index = 0;
+  let buffer = null;
+  let bufferOffset = 0;
+
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        while (!cancelled) {
+          if (buffer && bufferOffset < buffer.byteLength) {
+            const end = Math.min(buffer.byteLength, bufferOffset + DOWNLOAD_OUTPUT_CHUNK_BYTES);
+            controller.enqueue(buffer.subarray(bufferOffset, end));
+            bufferOffset = end;
+            if (bufferOffset >= buffer.byteLength) {
+              buffer = null;
+              bufferOffset = 0;
+            }
+            return;
+          }
+
+          if (index >= segments.length) {
+            controller.close();
+            return;
+          }
+
+          const segment = segments[index++];
+          buffer = await fetchManifestSegmentBytes(R2, segment.part, segment.range);
+          bufferOffset = 0;
+        }
       } catch (err) {
         controller.error(err);
       }
+    },
+    cancel() {
+      cancelled = true;
+      buffer = null;
     }
   });
 }
 
-async function streamManifestFile(manifest, env) {
-  const streams = [];
+async function streamManifestFile(manifest, env, R2, byteRange = null) {
   const parts = await resolveManifestParts(manifest, env);
-  for (const part of parts) {
-    streams.push(await fetchNodePart(part));
-  }
-  return concatStreams(streams);
+  return concatManifestPartStreams(parts, R2, byteRange, getDownloadRangeSize(env));
 }
 
-async function deleteManifestParts(manifest, env) {
+async function deleteManifestParts(manifest, env, preservedPartIds = new Set(), options = {}) {
   if (!isManifestFile(manifest)) return;
   const parts = await resolveManifestParts(manifest, env);
-  await Promise.allSettled(parts.filter(part => part.nodeUrl && part.token).map(part => fetch(
+  await Promise.allSettled(parts.filter(part => (
+    (part.storageType === 'r2' || part.nodeId === MAIN_STORAGE_NODE_ID) && !preservedPartIds.has(manifestPartId(part))
+  )).map(part => env.R2_BUCKET.delete(part.key)));
+  await Promise.allSettled(parts.filter(part => (
+    part.storageType !== 'r2' && part.nodeId !== MAIN_STORAGE_NODE_ID && part.nodeUrl && part.token && !preservedPartIds.has(manifestPartId(part))
+  )).map(part => fetch(
     part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key),
     { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + part.token } }
   )));
+  if (options.adjustUsage !== false) {
+    await adjustStoredNodeUsages(env, manifestNodeUsageDeltas(parts, -1, preservedPartIds));
+  }
 }
 
 async function handleStorageNodeApi(request, env) {
@@ -2279,19 +3452,44 @@ async function handleStorageNodeApi(request, env) {
   if (!key || key.includes('..')) return new Response('Missing key', { status: 400, headers: nodeCorsHeaders() });
 
   if (url.pathname === '/api/node/part' && request.method === 'PUT') {
+    const expectedSize = Number(url.searchParams.get('size') || 0);
+    const contentLength = Number(request.headers.get('Content-Length') || 0);
+    if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
+      return new Response(JSON.stringify({ ok: false, error: 'part size mismatch' }), {
+        status: 400,
+        headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+      });
+    }
     await R2.put(key, request.body, { httpMetadata: { contentType: 'application/octet-stream' } });
+    if (expectedSize > 0) {
+      const meta = await R2.head(key);
+      if (!meta || meta.size !== expectedSize) {
+        await R2.delete(key);
+        return new Response(JSON.stringify({ ok: false, error: 'stored part size mismatch' }), {
+          status: 500,
+          headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+        });
+      }
+    }
     return new Response(JSON.stringify({ ok: true, key }), {
       headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
     });
   }
 
-  if (url.pathname === '/api/node/part' && request.method === 'GET') {
-    const obj = await R2.get(key);
-    if (!obj) return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
-    return new Response(obj.body, {
-      headers: nodeCorsHeaders({
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': obj.size?.toString() || ''
+  if (url.pathname === '/api/node/part' && (request.method === 'GET' || request.method === 'HEAD')) {
+    const meta = await R2.head(key);
+    if (!meta) return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
+    const range = parseByteRange(request.headers.get('Range'), meta.size || 0);
+    if (range?.invalid) return rangeNotSatisfiableResponse(meta.size || 0, nodeCorsHeaders());
+    const obj = request.method === 'HEAD' ? null : await R2.get(key, r2RangeOptions(range));
+    if (request.method !== 'HEAD' && !obj) return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
+    return new Response(request.method === 'HEAD' ? null : obj.body, {
+      status: range ? 206 : 200,
+      headers: fileResponseHeaders({
+        baseHeaders: nodeCorsHeaders(),
+        contentType: 'application/octet-stream',
+        size: meta.size || 0,
+        range
       })
     });
   }
@@ -2304,238 +3502,6 @@ async function handleStorageNodeApi(request, env) {
   }
 
   return new Response('Not Found', { status: 404, headers: nodeCorsHeaders() });
-}
-
-function davHeaders(extra = {}) {
-  const headers = new Headers(extra);
-  headers.set('DAV', '1, 2');
-  headers.set('MS-Author-Via', 'DAV');
-  return headers;
-}
-
-function xmlEscape(value = '') {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-function stripDavPrefix(pathname) {
-  const raw = pathname.slice(DAV_PREFIX.length);
-  return decodeURIComponent(raw.replace(/^\/+/, ''));
-}
-
-function davHref(request, key, isCollection = false) {
-  const url = new URL(request.url);
-  const base = DAV_PREFIX + '/' + key.split('/').filter(Boolean).map(encodeURIComponent).join('/');
-  const href = base + (isCollection && base !== DAV_PREFIX + '/' && !base.endsWith('/') ? '/' : '');
-  return xmlEscape(url.origin + href);
-}
-
-function davPropResponse(request, key, item) {
-  const isCollection = item.type === 'folder';
-  const href = davHref(request, key, isCollection);
-  const displayName = key.split('/').filter(Boolean).pop() || 'dav';
-  const modified = item.uploaded ? new Date(item.uploaded).toUTCString() : new Date().toUTCString();
-  const contentLength = isCollection ? 0 : (item.size || 0);
-  const resourceType = isCollection ? '<D:collection/>' : '';
-  const contentType = isCollection ? 'httpd/unix-directory' : getMimeType(key);
-  const etag = item.etag ? `<D:getetag>"${xmlEscape(item.etag)}"</D:getetag>` : '';
-
-  return `<D:response>
-    <D:href>${href}</D:href>
-    <D:propstat>
-      <D:prop>
-        <D:displayname>${xmlEscape(displayName)}</D:displayname>
-        <D:resourcetype>${resourceType}</D:resourcetype>
-        <D:getcontentlength>${contentLength}</D:getcontentlength>
-        <D:getcontenttype>${xmlEscape(contentType)}</D:getcontenttype>
-        <D:getlastmodified>${modified}</D:getlastmodified>
-        ${etag}
-      </D:prop>
-      <D:status>HTTP/1.1 200 OK</D:status>
-    </D:propstat>
-  </D:response>`;
-}
-
-async function deleteR2Path(R2, key, env) {
-  const prefix = key.endsWith('/') ? key : key + '/';
-  const listed = await R2.list({ prefix });
-  if (listed.objects.length > 0) {
-    await Promise.all(listed.objects.map(async obj => {
-      const fullObj = await R2.get(obj.key);
-      const manifest = await readManifestObject(fullObj);
-      if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
-      await R2.delete(obj.key);
-    }));
-  } else {
-    const obj = await R2.get(key);
-    const manifest = await readManifestObject(obj);
-    if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
-    await R2.delete(key);
-  }
-}
-
-async function copyR2Path(R2, from, to) {
-  const fromPrefix = from.endsWith('/') ? from : from + '/';
-  const listed = await R2.list({ prefix: fromPrefix });
-  if (listed.objects.length > 0) {
-    await Promise.all(listed.objects.map(async obj => {
-      const source = await R2.get(obj.key);
-      if (!source) return;
-      const targetKey = (to.endsWith('/') ? to : to + '/') + obj.key.slice(fromPrefix.length);
-      await R2.put(targetKey, source.body, {
-        httpMetadata: { contentType: getMimeType(targetKey) },
-        customMetadata: source.customMetadata
-      });
-    }));
-    return;
-  }
-
-  const source = await R2.get(from);
-  if (!source) throw new Error('not found');
-  await R2.put(to, source.body, {
-    httpMetadata: { contentType: getMimeType(to) },
-    customMetadata: source.customMetadata
-  });
-}
-
-async function handleWebDav(request, env) {
-  if (!isWebDavAuthenticated(request, env)) return webDavAuthRequired();
-  const R2 = env.R2_BUCKET;
-  const url = new URL(request.url);
-  const key = stripDavPrefix(url.pathname);
-  const method = request.method.toUpperCase();
-
-  if (method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: davHeaders({
-        'Allow': 'OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, COPY',
-        'Content-Length': '0'
-      })
-    });
-  }
-
-  if (method === 'PROPFIND') {
-    const depth = request.headers.get('Depth') || 'infinity';
-    const responses = [];
-
-    if (!key) {
-      responses.push(davPropResponse(request, '', { type: 'folder' }));
-    } else {
-      const object = await R2.get(key);
-      if (object) {
-        const manifestSize = object.customMetadata?.r2driveSize ? parseInt(object.customMetadata.r2driveSize, 10) : null;
-        responses.push(davPropResponse(request, key, {
-          type: 'file',
-          size: Number.isFinite(manifestSize) ? manifestSize : object.size,
-          uploaded: object.uploaded,
-          etag: object.etag
-        }));
-      } else {
-        const folderPrefix = key.replace(/\/+$/, '') + '/';
-        const listed = await R2.list({ prefix: folderPrefix, delimiter: '/', limit: 1 });
-        if ((listed.objects || []).length === 0 && (listed.delimitedPrefixes || []).length === 0) {
-          return new Response('Not Found', { status: 404 });
-        }
-        responses.push(davPropResponse(request, folderPrefix, { type: 'folder' }));
-      }
-    }
-
-    if (depth !== '0') {
-      const prefix = key ? key.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix, delimiter: '/', include: ['customMetadata'] });
-      for (const folder of listed.delimitedPrefixes || []) {
-        responses.push(davPropResponse(request, folder, { type: 'folder' }));
-      }
-      for (const obj of listed.objects || []) {
-        if (obj.key === prefix || obj.key.endsWith('/.keep')) continue;
-        if (obj.key.slice(prefix.length).includes('/')) continue;
-        const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-        responses.push(davPropResponse(request, obj.key, {
-          type: 'file',
-          size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
-          uploaded: obj.uploaded,
-          etag: obj.etag
-        }));
-      }
-    }
-
-    const xml = `<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:">
-${responses.join('\n')}
-</D:multistatus>`;
-    return new Response(xml, {
-      status: 207,
-      headers: davHeaders({ 'Content-Type': 'application/xml; charset=utf-8' })
-    });
-  }
-
-  if (method === 'GET' || method === 'HEAD') {
-    if (!key || key.endsWith('/')) return new Response('Not Found', { status: 404 });
-    const obj = await R2.get(key);
-    if (!obj) return new Response('Not Found', { status: 404 });
-    const manifest = await readManifestObject(obj);
-    if (isManifestFile(manifest)) {
-      const headers = davHeaders({
-        'Content-Type': manifest.contentType || getMimeType(key),
-        'Content-Length': manifest.size?.toString() || ''
-      });
-      return new Response(method === 'HEAD' ? null : await streamManifestFile(manifest, env), { headers });
-    }
-    const headers = davHeaders({
-      'Content-Type': getMimeType(key),
-      'Content-Length': obj.size?.toString() || '',
-      'ETag': obj.etag || ''
-    });
-    return new Response(method === 'HEAD' ? null : obj.body, { headers });
-  }
-
-  if (method === 'PUT') {
-    if (!key || key.endsWith('/')) return new Response('Invalid destination', { status: 409 });
-    await R2.put(key, request.body, { httpMetadata: { contentType: getMimeType(key) } });
-    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
-  }
-
-  if (method === 'MKCOL') {
-    if (!key) return new Response('Conflict', { status: 409 });
-    const folderKey = key.replace(/\/+$/, '') + '/.keep';
-    await R2.put(folderKey, new Uint8Array(0));
-    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
-  }
-
-  if (method === 'DELETE') {
-    if (!key) return new Response('Forbidden', { status: 403 });
-    await deleteR2Path(R2, key, env);
-    return new Response(null, { status: 204, headers: davHeaders({ 'Content-Length': '0' }) });
-  }
-
-  if (method === 'MOVE' || method === 'COPY') {
-    if (!key) return new Response('Forbidden', { status: 403 });
-    const destination = request.headers.get('Destination');
-    if (!destination) return new Response('Missing Destination', { status: 400 });
-    const destinationUrl = new URL(destination, url.origin);
-    if (!destinationUrl.pathname.startsWith(DAV_PREFIX)) {
-      return new Response('Invalid Destination', { status: 400 });
-    }
-    const targetKey = stripDavPrefix(destinationUrl.pathname);
-    if (!targetKey) return new Response('Invalid Destination', { status: 409 });
-    try {
-      await copyR2Path(R2, key, targetKey);
-      if (method === 'MOVE') await deleteR2Path(R2, key, env);
-    } catch {
-      return new Response('Not Found', { status: 404 });
-    }
-    return new Response(null, { status: 201, headers: davHeaders({ 'Content-Length': '0' }) });
-  }
-
-  return new Response('Method Not Allowed', {
-    status: 405,
-    headers: davHeaders({ 'Allow': 'OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, MOVE, COPY' })
-  });
 }
 
 async function isAuthenticated(request, env) {
@@ -2559,12 +3525,12 @@ export default {
       return new Response('未配置 R2 存储桶。请在 wrangler.toml 中绑定 R2_BUCKET。', { status: 500 });
     }
 
-    if (path === DAV_PREFIX || path.startsWith(DAV_PREFIX + '/')) {
-      return handleWebDav(request, env);
-    }
-
     if (path.startsWith('/api/node/')) {
       return handleStorageNodeApi(request, env);
+    }
+
+    if (!env.CLIPBOARD_KV) {
+      return new Response('未配置 KV 命名空间。文件路径映射需要绑定 CLIPBOARD_KV。', { status: 500 });
     }
 
         // ── Auth endpoints ──
@@ -2595,29 +3561,10 @@ export default {
     }
 
     // ── Shared Folder Route (public, no auth required) ──
-        if (path === '/shared' || path === '/shared/') {
-      const prefix = SHARED_PREFIX + '/';
+    if (path === '/shared' || path === '/shared/') {
       const subPath = url.searchParams.get('path') || '';
-      const fullPrefix = subPath ? prefix + subPath.replace(/\/+$/, '') + '/' : prefix;
-
-      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/', include: ['customMetadata'] });
-
-      const folders = (listed.delimitedPrefixes || []).map(p => {
-        return p.slice(fullPrefix.length).replace(/\/$/, '');
-      }).filter(Boolean);
-
-      const files = (listed.objects || [])
-        .filter(obj => obj.key !== fullPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => {
-          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-          return {
-            name: obj.key.slice(fullPrefix.length),
-            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
-            uploaded: obj.uploaded,
-          };
-        })
-        .filter(f => f.name && !f.name.includes('/'));
-
+      const sharedPath = joinVirtualPath(SHARED_PREFIX, subPath);
+      const { folders, files } = await listDirectory(env, sharedPath);
       const html = renderSharedPage(folders, files, subPath, siteTitle, cloudIconUrl);
       return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
@@ -2625,25 +3572,8 @@ export default {
     // ── Shared API: List (public) ──
     if (path === '/api/shared-list') {
       const subPath = url.searchParams.get('path') || '';
-      const fullPrefix = SHARED_PREFIX + '/' + (subPath ? subPath.replace(/\/+$/, '') + '/' : '');
-      const listed = await R2.list({ prefix: fullPrefix, delimiter: '/', include: ['customMetadata'] });
-
-      const folders = (listed.delimitedPrefixes || []).map(p => {
-        return p.slice(fullPrefix.length).replace(/\/$/, '');
-      }).filter(Boolean);
-
-      const files = (listed.objects || [])
-        .filter(obj => obj.key !== fullPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => {
-          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-          return {
-            name: obj.key.slice(fullPrefix.length),
-            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
-            uploaded: obj.uploaded,
-          };
-        })
-        .filter(f => f.name && !f.name.includes('/'));
-
+      const sharedPath = joinVirtualPath(SHARED_PREFIX, subPath);
+      const { folders, files } = await listDirectory(env, sharedPath);
       return Response.json({ folders, files });
     }
 
@@ -2690,26 +3620,10 @@ export default {
         if (path === '/api/download') {
           const filePath = url.searchParams.get('path') || '';
           if (filePath.startsWith(SHARED_PREFIX + '/')) {
-            const obj = await R2.get(filePath);
-            if (!obj) return new Response('File not found', { status: 404 });
-            const manifest = await readManifestObject(obj);
-            if (isManifestFile(manifest)) {
-              const body = await streamManifestFile(manifest, env);
-              const filename = filePath.split('/').pop();
-              const headers = new Headers();
-              headers.set('Content-Type', manifest.contentType || getMimeType(filePath));
-              headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-              headers.set('Content-Length', manifest.size?.toString() || '');
-              return new Response(body, { headers });
-            }
-            const mime = getMimeType(filePath);
-            const filename = filePath.split('/').pop();
-            const headers = new Headers();
-            headers.set('Content-Type', mime);
-            headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-            headers.set('Content-Length', obj.size?.toString() || '');
-            headers.set('ETag', obj.etag || '');
-            return new Response(obj.body, { headers });
+            return storedVirtualFileResponse(request, R2, filePath, env, {
+              filename: virtualPathName(filePath),
+              contentType: getMimeType(filePath)
+            });
           }
         }
         return new Response('Unauthorized', { status: 401 });
@@ -2727,13 +3641,15 @@ export default {
     if (path === '/api/storage-nodes' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const nodes = await getStorageNodes(env, true);
+      const existing = body.id ? nodes.find(item => item.id === body.id) : null;
       const node = sanitizeNode({
         id: body.id || crypto.randomUUID(),
         name: body.name,
         url: body.url,
         token: body.token,
         enabled: body.enabled !== false,
-        weight: body.weight
+        weight: body.weight,
+        createdAt: existing?.createdAt || new Date().toISOString()
       });
       if (!node.name || !node.url || !node.token) return jsonResponse({ ok: false, error: 'missing fields' }, 400);
       const index = nodes.findIndex(item => item.id === node.id);
@@ -2779,27 +3695,7 @@ export default {
     // List files
     if (path === '/api/list') {
       const prefix = url.searchParams.get('path') || '';
-      const cleanPrefix = prefix ? prefix.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/', include: ['customMetadata'] });
-
-      const folders = (listed.delimitedPrefixes || []).map(p => {
-        const name = p.slice(cleanPrefix.length).replace(/\/$/, '');
-        return name;
-      }).filter(Boolean);
-
-      const files = (listed.objects || [])
-        .filter(obj => obj.key !== cleanPrefix)
-        .map(obj => {
-          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-          return {
-            name: obj.key.slice(cleanPrefix.length),
-            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
-            uploaded: obj.uploaded,
-            etag: obj.etag,
-          };
-        })
-        .filter(f => f.name && !f.name.includes('/'));
-
+      const { folders, files } = await listDirectory(env, prefix);
       return Response.json({ folders, files });
     }
 
@@ -2855,34 +3751,21 @@ export default {
     if (path === '/api/download') {
       const filePath = url.searchParams.get('path');
       if (!filePath) return new Response('Missing path', { status: 400 });
-      const obj = await R2.get(filePath);
-      if (!obj) return new Response('File not found', { status: 404 });
-      const manifest = await readManifestObject(obj);
-      if (isManifestFile(manifest)) {
-        const body = await streamManifestFile(manifest, env);
-        const filename = filePath.split('/').pop();
-        const headers = new Headers();
-        headers.set('Content-Type', manifest.contentType || getMimeType(filePath));
-        headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-        headers.set('Content-Length', manifest.size?.toString() || '');
-        return new Response(body, { headers });
-      }
-      const mime = getMimeType(filePath);
-      const filename = filePath.split('/').pop();
-      const headers = new Headers();
-      headers.set('Content-Type', mime);
-      headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-      headers.set('Content-Length', obj.size?.toString() || '');
-      headers.set('ETag', obj.etag || '');
-      return new Response(obj.body, { headers });
+      return storedVirtualFileResponse(request, R2, filePath, env);
     }
 
     // Upload file
     if (path === '/api/upload' && request.method === 'POST') {
       const filePath = url.searchParams.get('path');
       if (!filePath) return new Response('Missing path', { status: 400 });
+      const cleanPath = assertVirtualPath(filePath);
       const mime = getMimeType(filePath);
-      await R2.put(filePath, request.body, { httpMetadata: { contentType: mime } });
+      const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'file');
+      const object = await R2.put(storageKey, request.body, { httpMetadata: { contentType: mime } });
+      await replaceFileEntry(env, R2, fileEntryFromR2Meta(cleanPath, storageKey, object, {
+        contentType: mime,
+        storageType: 'r2'
+      }));
       return Response.json({ ok: true });
     }
 
@@ -2890,8 +3773,16 @@ export default {
     if (path === '/api/multipart/init' && request.method === 'POST') {
       const { path: filePath, contentType } = await request.json().catch(() => ({}));
       if (!filePath) return new Response('Missing path', { status: 400 });
+      const cleanPath = assertVirtualPath(filePath);
       const mime = contentType || getMimeType(filePath);
-      const upload = await R2.createMultipartUpload(filePath, { httpMetadata: { contentType: mime } });
+      const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'multipart');
+      const upload = await R2.createMultipartUpload(storageKey, { httpMetadata: { contentType: mime } });
+      await env.CLIPBOARD_KV.put(R2_MULTIPART_SESSION_PREFIX + upload.uploadId, JSON.stringify({
+        path: cleanPath,
+        storageKey,
+        contentType: mime,
+        createdAt: new Date().toISOString()
+      }), { expirationTtl: 86400 });
       return Response.json({ key: upload.key, uploadId: upload.uploadId });
     }
 
@@ -2902,7 +3793,11 @@ export default {
       if (!filePath || !uploadId || !Number.isInteger(partNumber) || partNumber < 1) {
         return new Response('Missing multipart fields', { status: 400 });
       }
-      const upload = R2.resumeMultipartUpload(filePath, uploadId);
+      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      if (!raw) return new Response('Multipart session expired', { status: 404 });
+      const session = JSON.parse(raw);
+      if (assertVirtualPath(filePath) !== session.path) return new Response('Multipart path mismatch', { status: 400 });
+      const upload = R2.resumeMultipartUpload(session.storageKey, uploadId);
       const part = await upload.uploadPart(partNumber, request.body);
       return Response.json(part);
     }
@@ -2912,17 +3807,62 @@ export default {
       if (!filePath || !uploadId || !Array.isArray(parts) || parts.length === 0) {
         return new Response('Missing multipart fields', { status: 400 });
       }
-      const upload = R2.resumeMultipartUpload(filePath, uploadId);
+      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      if (!raw) return new Response('Multipart session expired', { status: 404 });
+      const session = JSON.parse(raw);
+      if (assertVirtualPath(filePath) !== session.path) return new Response('Multipart path mismatch', { status: 400 });
+      const upload = R2.resumeMultipartUpload(session.storageKey, uploadId);
       const object = await upload.complete(parts);
+      await replaceFileEntry(env, R2, fileEntryFromR2Meta(session.path, session.storageKey, object, {
+        contentType: session.contentType,
+        storageType: 'r2',
+        createdAt: session.createdAt
+      }));
+      await env.CLIPBOARD_KV.delete(R2_MULTIPART_SESSION_PREFIX + uploadId);
       return Response.json({ ok: true, key: object.key, etag: object.etag });
     }
 
     if (path === '/api/multipart/abort' && request.method === 'POST') {
       const { path: filePath, uploadId } = await request.json().catch(() => ({}));
       if (!filePath || !uploadId) return new Response('Missing multipart fields', { status: 400 });
-      const upload = R2.resumeMultipartUpload(filePath, uploadId);
-      await upload.abort();
+      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      if (raw) {
+        const session = JSON.parse(raw);
+        const upload = R2.resumeMultipartUpload(session.storageKey, uploadId);
+        await upload.abort();
+        await env.CLIPBOARD_KV.delete(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      }
       return Response.json({ ok: true });
+    }
+
+    if (path === '/api/distributed/main-part' && request.method === 'PUT') {
+      const sessionId = url.searchParams.get('sessionId') || '';
+      const token = url.searchParams.get('token') || '';
+      const partNumber = parseInt(url.searchParams.get('partNumber') || '', 10);
+      if (!sessionId || !token || !Number.isInteger(partNumber) || partNumber < 1) {
+        return jsonResponse({ ok: false, error: 'missing fields' }, 400);
+      }
+      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      if (!raw) return jsonResponse({ ok: false, error: 'session expired' }, 404);
+      const session = JSON.parse(raw);
+      const part = (session.parts || []).find(item => item.partNumber === partNumber);
+      if (!part || part.storageType !== 'r2' || part.uploadToken !== token) {
+        return jsonResponse({ ok: false, error: 'invalid part token' }, 401);
+      }
+      const expectedSize = Math.max(0, Number(part.size || 0));
+      const contentLength = Number(request.headers.get('Content-Length') || 0);
+      if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
+        return jsonResponse({ ok: false, error: 'part size mismatch' }, 400);
+      }
+      await R2.put(part.key, request.body, { httpMetadata: { contentType: 'application/octet-stream' } });
+      if (expectedSize > 0) {
+        const meta = await R2.head(part.key);
+        if (!meta || meta.size !== expectedSize) {
+          await R2.delete(part.key);
+          return jsonResponse({ ok: false, error: 'stored part size mismatch' }, 500);
+        }
+      }
+      return jsonResponse({ ok: true, key: part.key });
     }
 
     if (path === '/api/distributed/init' && request.method === 'POST') {
@@ -2934,38 +3874,51 @@ export default {
       if (!filePath || fileSize <= 0 || chunkSize <= 0 || totalParts <= 0) {
         return jsonResponse({ ok: false, error: 'missing fields' }, 400);
       }
-      const nodes = await getStorageNodes(env);
-      if (!nodes.length) return jsonResponse({ ok: false, error: 'no storage nodes' }, 409);
-
-      const weightedNodes = [];
-      for (const node of nodes) {
-        for (let i = 0; i < (node.weight || 1); i++) weightedNodes.push(node);
+      if (fileSize <= DISTRIBUTED_UPLOAD_THRESHOLD_BYTES) {
+        return jsonResponse({ ok: false, error: 'file below distributed threshold' }, 409);
       }
+      const cleanPath = assertVirtualPath(filePath);
+      const nodes = [mainStorageNode(), ...await getStorageNodes(env)];
+
       const sessionId = crypto.randomUUID();
       const now = new Date().toISOString();
+      const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'manifest');
+      const partSizes = [];
+      for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+        partSizes.push(Math.min(chunkSize, fileSize - (partNumber - 1) * chunkSize));
+      }
+      const allocatedNodes = await allocateDistributedParts(env, nodes, partSizes);
       const parts = [];
 
       for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
-        const node = weightedNodes[(partNumber - 1) % weightedNodes.length];
-        const partKey = NODE_PART_PREFIX + sessionId + '/' + String(partNumber).padStart(6, '0');
+        const node = allocatedNodes[partNumber - 1];
+        const partKey = NODE_PART_PREFIX + sessionId + '_' + String(partNumber).padStart(6, '0');
+        const partSize = partSizes[partNumber - 1];
+        const isMain = node.id === MAIN_STORAGE_NODE_ID || node.storageType === 'r2';
+        const uploadToken = isMain ? crypto.randomUUID().replace(/-/g, '') : '';
         parts.push({
           partNumber,
-          size: Math.min(chunkSize, fileSize - (partNumber - 1) * chunkSize),
+          size: partSize,
           key: partKey,
-          nodeId: node.id,
-          nodeName: node.name,
-          nodeUrl: node.url,
-          token: node.token,
-          uploadUrl: node.url + '/api/node/part?key=' + encodeURIComponent(partKey)
+          storageType: isMain ? 'r2' : 'node',
+          nodeId: isMain ? MAIN_STORAGE_NODE_ID : node.id,
+          nodeName: isMain ? '主控账号' : node.name,
+          nodeUrl: isMain ? '' : node.url,
+          token: isMain ? '' : node.token,
+          uploadToken,
+          uploadUrl: isMain
+            ? '/api/distributed/main-part?sessionId=' + encodeURIComponent(sessionId) + '&partNumber=' + partNumber + '&token=' + encodeURIComponent(uploadToken)
+            : node.url + '/api/node/part?key=' + encodeURIComponent(partKey) + '&size=' + partSize
         });
       }
 
       const session = {
         version: MANIFEST_VERSION,
         sessionId,
-        path: filePath,
+        path: cleanPath,
+        storageKey,
         size: fileSize,
-        contentType: body.contentType || getMimeType(filePath),
+        contentType: body.contentType || getMimeType(cleanPath),
         chunkSize,
         createdAt: now,
         parts
@@ -2978,7 +3931,7 @@ export default {
           partNumber: part.partNumber,
           size: part.size,
           uploadUrl: part.uploadUrl,
-          token: part.token
+          token: part.token || ''
         }))
       });
     }
@@ -3001,18 +3954,27 @@ export default {
           partNumber: part.partNumber,
           size: part.size,
           key: part.key,
+          storageType: part.storageType || 'node',
           nodeId: part.nodeId,
           nodeName: part.nodeName,
           nodeUrl: part.nodeUrl
         }))
       };
-      await R2.put(session.path, JSON.stringify(manifest), {
+      const object = await R2.put(session.storageKey, JSON.stringify(manifest), {
         httpMetadata: { contentType: MANIFEST_CONTENT_TYPE },
         customMetadata: {
           r2driveManifest: '1',
           r2driveSize: String(session.size)
         }
       });
+      await replaceFileEntry(env, R2, fileEntryFromR2Meta(session.path, session.storageKey, object, {
+        size: session.size,
+        contentType: session.contentType,
+        storageType: 'distributed',
+        uploaded: manifest.completedAt,
+        createdAt: session.createdAt
+      }));
+      await adjustStoredNodeUsages(env, manifestNodeUsageDeltas(session.parts, 1));
       await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
       return jsonResponse({ ok: true });
     }
@@ -3023,32 +3985,66 @@ export default {
       const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
       if (raw) {
         const session = JSON.parse(raw);
-        await deleteManifestParts({ type: 'distributed-file', parts: session.parts }, env);
+        await deleteManifestParts({ type: 'distributed-file', parts: session.parts }, env, new Set(), { adjustUsage: false });
         await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
       }
       return jsonResponse({ ok: true });
+    }
+
+    // Server-side paste for clipboard copy/cut. Data stays inside R2/Workers.
+    if (path === '/api/clipboard/paste' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const action = body.action;
+      if (action !== 'copy' && action !== 'cut') {
+        return jsonResponse({ ok: false, error: 'invalid action' }, 400);
+      }
+
+      const items = Array.isArray(body.items) ? body.items.map(item => String(item ?? '')) : [];
+      if (!items.length) return jsonResponse({ ok: false, error: 'missing items' }, 400);
+
+      const sourcePath = assertVirtualPath(body.sourcePath || '', { allowRoot: true });
+      const targetPath = assertVirtualPath(body.targetPath || '', { allowRoot: true });
+      const results = [];
+
+      for (const rawName of items) {
+        const name = normalizeVirtualPath(rawName);
+        if (!name || name.includes('/')) {
+          results.push({ name: rawName, ok: false, error: 'invalid item' });
+          continue;
+        }
+
+        const from = joinVirtualPath(sourcePath, name);
+        const to = joinVirtualPath(targetPath, name);
+        if (from === to) {
+          results.push({ name, from, to, ok: true, skipped: true, reason: 'same path' });
+          continue;
+        }
+
+        try {
+          const result = action === 'cut'
+            ? await moveVirtualPath(env, R2, from, to)
+            : await copyVirtualPath(env, R2, from, to);
+          results.push({ name, from, to, ok: true, ...result });
+        } catch (err) {
+          results.push({ name, from, to, ok: false, error: err?.message || 'operation failed' });
+        }
+      }
+
+      const failed = results.filter(item => !item.ok);
+      return jsonResponse({
+        ok: failed.length === 0,
+        action,
+        sourcePath,
+        targetPath,
+        results
+      }, failed.length ? 207 : 200);
     }
 
     // Delete file/folder
     if (path === '/api/delete' && request.method === 'DELETE') {
       const filePath = url.searchParams.get('path');
       if (!filePath) return new Response('Missing path', { status: 400 });
-      // If folder, delete all objects with prefix
-      const prefix = filePath.endsWith('/') ? filePath : filePath + '/';
-      const listed = await R2.list({ prefix });
-      if (listed.objects.length > 0) {
-        await Promise.all(listed.objects.map(async obj => {
-          const fullObj = await R2.get(obj.key);
-          const manifest = await readManifestObject(fullObj);
-          if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
-          await R2.delete(obj.key);
-        }));
-      } else {
-        const obj = await R2.get(filePath);
-        const manifest = await readManifestObject(obj);
-        if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
-        await R2.delete(filePath);
-      }
+      await deleteVirtualPath(env, R2, filePath);
       return Response.json({ ok: true });
     }
 
@@ -3056,59 +4052,29 @@ export default {
     if (path === '/api/rename' && request.method === 'POST') {
       const { from, to } = await request.json().catch(() => ({}));
       if (!from || !to) return new Response('Missing fields', { status: 400 });
-      const obj = await R2.get(from);
-      if (!obj) return new Response('Not found', { status: 404 });
-      const manifest = await readManifestObject(obj);
-      if (isManifestFile(manifest)) {
-        manifest.path = to;
-        await R2.put(to, JSON.stringify(manifest), {
-          httpMetadata: { contentType: MANIFEST_CONTENT_TYPE },
-          customMetadata: {
-            r2driveManifest: '1',
-            r2driveSize: String(manifest.size || 0)
-          }
-        });
-        await R2.delete(from);
+      try {
+        await moveVirtualPath(env, R2, from, to);
         return Response.json({ ok: true });
+      } catch (err) {
+        const message = err?.message || 'rename failed';
+        return jsonResponse({ ok: false, error: message }, message === 'not found' ? 404 : 400);
       }
-      const mime = getMimeType(to);
-      await R2.put(to, obj.body, { httpMetadata: { contentType: mime } });
-      await R2.delete(from);
-      return Response.json({ ok: true });
     }
 
-    // Create folder (R2 uses empty object as placeholder)
+    // Create folder in the KV-backed virtual path table.
     if (path === '/api/mkdir' && request.method === 'POST') {
       const { path: folderPath } = await request.json().catch(() => ({}));
       if (!folderPath) return new Response('Missing path', { status: 400 });
-      const key = folderPath.endsWith('/') ? folderPath : folderPath + '/.keep';
-      await R2.put(key, new Uint8Array(0));
+      await putFolderEntry(env, folderPath);
       return Response.json({ ok: true });
     }
 
     // ── UI Route ──
     if (path === '/' || path === '') {
       const prefix = url.searchParams.get('path') || '';
-      const cleanPrefix = prefix ? prefix.replace(/\/+$/, '') + '/' : '';
-      const listed = await R2.list({ prefix: cleanPrefix, delimiter: '/', include: ['customMetadata'] });
-
-      const folders = (listed.delimitedPrefixes || []).map(p => {
-        return p.slice(cleanPrefix.length).replace(/\/$/, '');
-      }).filter(Boolean);
-
-      const files = (listed.objects || [])
-        .filter(obj => obj.key !== cleanPrefix && !obj.key.endsWith('/.keep'))
-        .map(obj => {
-          const manifestSize = obj.customMetadata?.r2driveSize ? parseInt(obj.customMetadata.r2driveSize, 10) : null;
-          return {
-            name: obj.key.slice(cleanPrefix.length),
-            size: Number.isFinite(manifestSize) ? manifestSize : obj.size,
-            uploaded: obj.uploaded,
-          };
-        })
-        .filter(f => f.name && !f.name.includes('/'));
-
-      const html = renderDrivePage(folders, files, prefix, siteTitle, cloudIconUrl);
+      const cleanPrefix = assertVirtualPath(prefix, { allowRoot: true });
+      const { folders, files } = await listDirectory(env, cleanPrefix);
+      const html = renderDrivePage(folders, files, cleanPrefix, siteTitle, cloudIconUrl);
       return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
