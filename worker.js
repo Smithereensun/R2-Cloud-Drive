@@ -12,11 +12,12 @@
  *    binding = "R2_BUCKET"
  *    bucket_name = "your-bucket-name"
  *
- * 2. KV 命名空间 (必须 - 用于剪贴板跨页面持久化)
- *    在 wrangler.toml 中绑定 KV:
- *    [[kv_namespaces]]
- *    binding = "CLIPBOARD_KV"
- *    id = "your-kv-namespace-id"
+ * 2. D1 数据库 (必须 - 用于文件路径映射和上传会话)
+ *    在 wrangler.toml 中绑定 D1:
+ *    [[d1_databases]]
+ *    binding = "DB"
+ *    database_name = "your-db-name"
+ *    database_id = "your-database-id"
  *
  * 3. 访问密码 (可选 - 不设置则为公开访问)
  *    在 Worker 环境变量中设置:
@@ -41,7 +42,7 @@
  * - 网格/列表两种视图模式
  * - 单击选中文件，支持多选
  * - 横向操作栏：复制、剪切、粘贴、重命名、下载、删除
- * - 剪贴板通过 KV 持久化，跨页面导航不丢失
+ * - 剪贴板通过 D1 持久化，跨页面导航不丢失
  * - 共享文件夹 (/shared) — 无需登录，只读下载
  * - 容量显示 (默认 10 GB)
  * - 多账号存储节点：大文件分片分布存储 + manifest 索引
@@ -1017,8 +1018,8 @@ function updateActionBar() {
   }
 }
 
-// ── Async check clipboard from KV on load ──
-async function checkClipboardFromKV() {
+// ── Async check clipboard from metadata store on load ──
+async function checkClipboardFromStore() {
   const pasteBtn = document.getElementById('pasteBtn');
   if (!pasteBtn) return;
   try {
@@ -1113,7 +1114,7 @@ function getClipboardId() {
   return id;
 }
 
-// ── Clipboard Persistence via KV API (survives page navigation) ──
+// ── Clipboard Persistence via metadata API (survives page navigation) ──
 async function saveClipboard() {
   try {
     await fetch('/api/clipboard?id=' + getClipboardId(), {
@@ -1162,7 +1163,7 @@ async function cutSelected() {
   updateActionBar();
 }
 async function pasteFiles() {
-  // Reload clipboard from KV in case of page navigation
+  // Reload clipboard from metadata store in case of page navigation
   await loadClipboard();
   if (!clipboard.items.length) return;
   const action = clipboard.action || 'copy';
@@ -1403,7 +1404,13 @@ function uploadFiles(files) {
     return uploadSingleFile(file, path, fill, pctSpan);
   });
 
-  Promise.allSettled(tasks).then(() => {
+  Promise.allSettled(tasks).then(results => {
+    const failed = results.filter(result => result.status === 'rejected');
+    if (failed.length) {
+      const message = failed[0].reason?.message || '上传失败';
+      showSnackbar(failed.length + ' 个文件上传失败：' + message);
+      return;
+    }
     showSnackbar('上传完成', '刷新', () => location.reload());
   });
 }
@@ -1414,6 +1421,28 @@ function uploadSingleFile(file, path, fill, pctSpan) {
   }
   return uploadDistributed(file, path, fill, pctSpan)
     .catch(() => uploadMultipart(file, path, fill, pctSpan));
+}
+
+function uploadErrorMessage(xhr, fallback = 'upload failed') {
+  const text = xhr.responseText || '';
+  if (!text) return fallback;
+  try {
+    const data = JSON.parse(text);
+    return data.error || data.message || fallback;
+  } catch {
+    return text.slice(0, 200) || fallback;
+  }
+}
+
+async function fetchErrorMessage(res, fallback) {
+  const text = await res.text().catch(() => '');
+  if (!text) return fallback;
+  try {
+    const data = JSON.parse(text);
+    return data.error || data.message || fallback;
+  } catch {
+    return text.slice(0, 200) || fallback;
+  }
 }
 
 function uploadDirect(file, path, fill, pctSpan) {
@@ -1430,7 +1459,7 @@ function uploadDirect(file, path, fill, pctSpan) {
       if (xhr.status === 200) {
         fill.classList.add('done'); pctSpan.textContent = '✓'; resolve();
       } else {
-        fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error('upload failed'));
+        fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error(uploadErrorMessage(xhr)));
       }
     };
     xhr.onerror = () => {
@@ -1458,7 +1487,7 @@ async function uploadMultipart(file, path, fill, pctSpan) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ path, contentType: file.type || '' })
     });
-    if (!initRes.ok) throw new Error('multipart init failed');
+    if (!initRes.ok) throw new Error(await fetchErrorMessage(initRes, 'multipart init failed'));
     const initData = await initRes.json();
     uploadId = initData.uploadId;
 
@@ -1480,7 +1509,7 @@ async function uploadMultipart(file, path, fill, pctSpan) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ path, uploadId, parts })
     });
-    if (!completeRes.ok) throw new Error('multipart complete failed');
+    if (!completeRes.ok) throw new Error(await fetchErrorMessage(completeRes, 'multipart complete failed'));
     fill.style.width = '100%';
     fill.classList.add('done');
     pctSpan.textContent = '✓';
@@ -1510,7 +1539,7 @@ function uploadMultipartPart(path, uploadId, partNumber, chunk, onProgress) {
     };
     xhr.onload = () => {
       if (xhr.status !== 200) {
-        reject(new Error('multipart part failed'));
+        reject(new Error(uploadErrorMessage(xhr, 'multipart part failed')));
         return;
       }
       try {
@@ -1540,7 +1569,7 @@ async function uploadDistributed(file, path, fill, pctSpan) {
       parts: totalParts
     })
   });
-  if (!initRes.ok) throw new Error('distributed storage unavailable');
+  if (!initRes.ok) throw new Error(await fetchErrorMessage(initRes, 'distributed storage unavailable'));
   const session = await initRes.json();
   const sessionId = session.sessionId;
 
@@ -1564,7 +1593,7 @@ async function uploadDistributed(file, path, fill, pctSpan) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ sessionId })
     });
-    if (!completeRes.ok) throw new Error('distributed complete failed');
+    if (!completeRes.ok) throw new Error(await fetchErrorMessage(completeRes, 'distributed complete failed'));
     fill.style.width = '100%';
     fill.classList.add('done');
     pctSpan.textContent = '✓';
@@ -1705,7 +1734,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setView(viewMode);
   currentPath = decodeURIComponent(new URLSearchParams(location.search).get('path') || '');
   initDarkMode();
-  checkClipboardFromKV();
+  checkClipboardFromStore();
   updateStorageInfo();
   updateActionBar();
 });
@@ -2286,6 +2315,7 @@ const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000;
 const STORAGE_NODES_KV_KEY = 'storage_nodes';
 const MULTIPART_SESSION_PREFIX = 'multipart_session_';
 const R2_MULTIPART_SESSION_PREFIX = 'r2multipart_session_';
+const D1_KV_TABLE = 'r2drive_kv';
 const MAIN_STORAGE_NODE_ID = 'main';
 const FS_FILE_PREFIX = 'r2drive:fs:file:';
 const FS_FOLDER_PREFIX = 'r2drive:fs:folder:';
@@ -2379,8 +2409,8 @@ function mainStorageNode() {
 }
 
 async function getStorageNodes(env, includeDisabled = false) {
-  if (!env.CLIPBOARD_KV) return [];
-  const raw = await env.CLIPBOARD_KV.get(STORAGE_NODES_KV_KEY);
+  if (!hasMetadataStore(env)) return [];
+  const raw = await requireFsKv(env).get(STORAGE_NODES_KV_KEY);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -2393,7 +2423,7 @@ async function getStorageNodes(env, includeDisabled = false) {
 }
 
 async function saveStorageNodes(env, nodes) {
-  await env.CLIPBOARD_KV.put(STORAGE_NODES_KV_KEY, JSON.stringify(nodes.map(sanitizeNode)));
+  await requireFsKv(env).put(STORAGE_NODES_KV_KEY, JSON.stringify(nodes.map(sanitizeNode)));
 }
 
 async function calculateR2Usage(R2) {
@@ -2421,8 +2451,87 @@ function publicFileEntry(entry) {
   };
 }
 
+const d1SchemaReady = new WeakMap();
+
+function hasMetadataStore(env) {
+  return !!(env.DB || env.CLIPBOARD_KV);
+}
+
+async function ensureD1KvSchema(DB) {
+  if (d1SchemaReady.get(DB)) return;
+  await DB.prepare(`
+    CREATE TABLE IF NOT EXISTS ${D1_KV_TABLE} (
+      "key" TEXT PRIMARY KEY,
+      "value" TEXT NOT NULL,
+      expires_at INTEGER
+    )
+  `).run();
+  await DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_${D1_KV_TABLE}_expires_at
+      ON ${D1_KV_TABLE} (expires_at)
+  `).run();
+  d1SchemaReady.set(DB, true);
+}
+
+function prefixUpperBound(prefix) {
+  return prefix ? prefix + '\uffff' : '\uffff';
+}
+
+function d1KvStore(DB) {
+  return {
+    async get(key) {
+      await ensureD1KvSchema(DB);
+      const row = await DB.prepare(`SELECT "value", expires_at FROM ${D1_KV_TABLE} WHERE "key" = ?`)
+        .bind(key)
+        .first();
+      if (!row) return null;
+      const expiresAt = Number(row.expires_at || 0);
+      if (expiresAt && expiresAt <= Math.floor(Date.now() / 1000)) {
+        await this.delete(key);
+        return null;
+      }
+      return row.value;
+    },
+    async put(key, value, options = {}) {
+      await ensureD1KvSchema(DB);
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt = options.expiration
+        ? Number(options.expiration)
+        : (options.expirationTtl ? now + Number(options.expirationTtl) : null);
+      await DB.prepare(`
+        INSERT INTO ${D1_KV_TABLE} ("key", "value", expires_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT("key") DO UPDATE SET "value" = excluded."value", expires_at = excluded.expires_at
+      `).bind(key, String(value), Number.isFinite(expiresAt) ? expiresAt : null).run();
+    },
+    async delete(key) {
+      await ensureD1KvSchema(DB);
+      await DB.prepare(`DELETE FROM ${D1_KV_TABLE} WHERE "key" = ?`).bind(key).run();
+    },
+    async list({ prefix = '', cursor = '', limit = 1000 } = {}) {
+      await ensureD1KvSchema(DB);
+      const pageSize = Math.max(1, Math.min(1000, Number(limit || 1000)));
+      const offset = Math.max(0, parseInt(cursor || '0', 10) || 0);
+      const now = Math.floor(Date.now() / 1000);
+      const result = await DB.prepare(`
+        SELECT "key" AS name
+        FROM ${D1_KV_TABLE}
+        WHERE "key" >= ? AND "key" < ? AND (expires_at IS NULL OR expires_at > ?)
+        ORDER BY "key"
+        LIMIT ? OFFSET ?
+      `).bind(prefix, prefixUpperBound(prefix), now, pageSize + 1, offset).all();
+      const rows = result.results || [];
+      return {
+        keys: rows.slice(0, pageSize).map(row => ({ name: row.name })),
+        cursor: rows.length > pageSize ? String(offset + pageSize) : undefined
+      };
+    }
+  };
+}
+
 function requireFsKv(env) {
-  if (!env.CLIPBOARD_KV) throw new Error('CLIPBOARD_KV binding is required for file path mapping');
+  if (env.DB) return d1KvStore(env.DB);
+  if (!env.CLIPBOARD_KV) throw new Error('DB binding is required for file path mapping');
   return env.CLIPBOARD_KV;
 }
 
@@ -2496,6 +2605,18 @@ async function kvPutJson(env, key, data, options) {
   await requireFsKv(env).put(key, JSON.stringify(data), options);
 }
 
+async function kvGetRaw(env, key) {
+  return requireFsKv(env).get(key);
+}
+
+async function kvPutRaw(env, key, value, options) {
+  await requireFsKv(env).put(key, value, options);
+}
+
+async function kvDelete(env, key) {
+  await requireFsKv(env).delete(key);
+}
+
 async function kvListKeys(env, prefix) {
   const keys = [];
   let cursor;
@@ -2505,7 +2626,7 @@ async function kvListKeys(env, prefix) {
     keys.push(...(listed.keys || []).map(item => item.name));
     cursor = listed.cursor;
     safety++;
-    if (safety > 1000) throw new Error('too many KV list pages');
+    if (safety > 1000) throw new Error('too many metadata list pages');
   } while (cursor);
   return keys;
 }
@@ -3511,9 +3632,29 @@ async function isAuthenticated(request, env) {
   return verifyToken(token, env.ACCESS_PASSWORD);
 }
 
+function workerErrorResponse(request, err) {
+  const url = new URL(request.url);
+  const message = err?.message || 'Internal Server Error';
+  const status = message === 'invalid path' || message.includes('mismatch') || message.includes('Missing') ? 400 : 500;
+  console.error('Worker request failed', {
+    method: request.method,
+    path: url.pathname,
+    error: message,
+    stack: err?.stack || ''
+  });
+  if (url.pathname.startsWith('/api/')) {
+    return jsonResponse({ ok: false, error: message }, status);
+  }
+  return new Response(message, {
+    status,
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
+  });
+}
+
 // ── Main Handler ──
 export default {
   async fetch(request, env) {
+    try {
     const url = new URL(request.url);
     const path = url.pathname;
     const R2 = env.R2_BUCKET;
@@ -3529,8 +3670,8 @@ export default {
       return handleStorageNodeApi(request, env);
     }
 
-    if (!env.CLIPBOARD_KV) {
-      return new Response('未配置 KV 命名空间。文件路径映射需要绑定 CLIPBOARD_KV。', { status: 500 });
+    if (!hasMetadataStore(env)) {
+      return new Response('未配置 D1 数据库。文件路径映射需要绑定 DB。', { status: 500 });
     }
 
         // ── Auth endpoints ──
@@ -3577,13 +3718,13 @@ export default {
       return Response.json({ folders, files });
     }
 
-        // ── Clipboard API (KV-backed, no auth required for clipboard operations) ──
+        // ── Clipboard API (metadata-backed, no auth required for clipboard operations) ──
     if (path === '/api/clipboard' && request.method === 'POST') {
-      // Save clipboard to KV
+      // Save clipboard to metadata store
       const clipboardId = url.searchParams.get('id') || 'default';
       const body = await request.json().catch(() => ({}));
       if (body.items && Array.isArray(body.items)) {
-        await env.CLIPBOARD_KV.put('clipboard_' + clipboardId, JSON.stringify({
+        await kvPutRaw(env, 'clipboard_' + clipboardId, JSON.stringify({
           items: body.items,
           action: body.action || 'copy',
           sourcePath: body.sourcePath || ''
@@ -3593,18 +3734,18 @@ export default {
       return Response.json({ ok: false, error: 'invalid data' }, { status: 400 });
     }
     if (path === '/api/clipboard' && request.method === 'GET') {
-      // Get clipboard from KV
+      // Get clipboard from metadata store
       const clipboardId = url.searchParams.get('id') || 'default';
-      const data = await env.CLIPBOARD_KV.get('clipboard_' + clipboardId);
+      const data = await kvGetRaw(env, 'clipboard_' + clipboardId);
       if (data) {
         return new Response(data, { headers: { 'Content-Type': 'application/json' } });
       }
       return Response.json({ items: [], action: null, sourcePath: '' });
     }
     if (path === '/api/clipboard' && request.method === 'DELETE') {
-      // Clear clipboard from KV
+      // Clear clipboard from metadata store
       const clipboardId = url.searchParams.get('id') || 'default';
-      await env.CLIPBOARD_KV.delete('clipboard_' + clipboardId);
+      await kvDelete(env, 'clipboard_' + clipboardId);
       return Response.json({ ok: true });
     }
 
@@ -3777,7 +3918,7 @@ export default {
       const mime = contentType || getMimeType(filePath);
       const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'multipart');
       const upload = await R2.createMultipartUpload(storageKey, { httpMetadata: { contentType: mime } });
-      await env.CLIPBOARD_KV.put(R2_MULTIPART_SESSION_PREFIX + upload.uploadId, JSON.stringify({
+      await kvPutRaw(env, R2_MULTIPART_SESSION_PREFIX + upload.uploadId, JSON.stringify({
         path: cleanPath,
         storageKey,
         contentType: mime,
@@ -3793,7 +3934,7 @@ export default {
       if (!filePath || !uploadId || !Number.isInteger(partNumber) || partNumber < 1) {
         return new Response('Missing multipart fields', { status: 400 });
       }
-      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      const raw = await kvGetRaw(env, R2_MULTIPART_SESSION_PREFIX + uploadId);
       if (!raw) return new Response('Multipart session expired', { status: 404 });
       const session = JSON.parse(raw);
       if (assertVirtualPath(filePath) !== session.path) return new Response('Multipart path mismatch', { status: 400 });
@@ -3807,7 +3948,7 @@ export default {
       if (!filePath || !uploadId || !Array.isArray(parts) || parts.length === 0) {
         return new Response('Missing multipart fields', { status: 400 });
       }
-      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      const raw = await kvGetRaw(env, R2_MULTIPART_SESSION_PREFIX + uploadId);
       if (!raw) return new Response('Multipart session expired', { status: 404 });
       const session = JSON.parse(raw);
       if (assertVirtualPath(filePath) !== session.path) return new Response('Multipart path mismatch', { status: 400 });
@@ -3818,19 +3959,19 @@ export default {
         storageType: 'r2',
         createdAt: session.createdAt
       }));
-      await env.CLIPBOARD_KV.delete(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      await kvDelete(env, R2_MULTIPART_SESSION_PREFIX + uploadId);
       return Response.json({ ok: true, key: object.key, etag: object.etag });
     }
 
     if (path === '/api/multipart/abort' && request.method === 'POST') {
       const { path: filePath, uploadId } = await request.json().catch(() => ({}));
       if (!filePath || !uploadId) return new Response('Missing multipart fields', { status: 400 });
-      const raw = await env.CLIPBOARD_KV.get(R2_MULTIPART_SESSION_PREFIX + uploadId);
+      const raw = await kvGetRaw(env, R2_MULTIPART_SESSION_PREFIX + uploadId);
       if (raw) {
         const session = JSON.parse(raw);
         const upload = R2.resumeMultipartUpload(session.storageKey, uploadId);
         await upload.abort();
-        await env.CLIPBOARD_KV.delete(R2_MULTIPART_SESSION_PREFIX + uploadId);
+        await kvDelete(env, R2_MULTIPART_SESSION_PREFIX + uploadId);
       }
       return Response.json({ ok: true });
     }
@@ -3842,7 +3983,7 @@ export default {
       if (!sessionId || !token || !Number.isInteger(partNumber) || partNumber < 1) {
         return jsonResponse({ ok: false, error: 'missing fields' }, 400);
       }
-      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      const raw = await kvGetRaw(env, MULTIPART_SESSION_PREFIX + sessionId);
       if (!raw) return jsonResponse({ ok: false, error: 'session expired' }, 404);
       const session = JSON.parse(raw);
       const part = (session.parts || []).find(item => item.partNumber === partNumber);
@@ -3923,7 +4064,7 @@ export default {
         createdAt: now,
         parts
       };
-      await env.CLIPBOARD_KV.put(MULTIPART_SESSION_PREFIX + sessionId, JSON.stringify(session), { expirationTtl: 86400 });
+      await kvPutRaw(env, MULTIPART_SESSION_PREFIX + sessionId, JSON.stringify(session), { expirationTtl: 86400 });
       return jsonResponse({
         ok: true,
         sessionId,
@@ -3939,7 +4080,7 @@ export default {
     if (path === '/api/distributed/complete' && request.method === 'POST') {
       const { sessionId } = await request.json().catch(() => ({}));
       if (!sessionId) return jsonResponse({ ok: false, error: 'missing sessionId' }, 400);
-      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      const raw = await kvGetRaw(env, MULTIPART_SESSION_PREFIX + sessionId);
       if (!raw) return jsonResponse({ ok: false, error: 'session expired' }, 404);
       const session = JSON.parse(raw);
       const manifest = {
@@ -3975,18 +4116,18 @@ export default {
         createdAt: session.createdAt
       }));
       await adjustStoredNodeUsages(env, manifestNodeUsageDeltas(session.parts, 1));
-      await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
+      await kvDelete(env, MULTIPART_SESSION_PREFIX + sessionId);
       return jsonResponse({ ok: true });
     }
 
     if (path === '/api/distributed/abort' && request.method === 'POST') {
       const { sessionId } = await request.json().catch(() => ({}));
       if (!sessionId) return jsonResponse({ ok: false, error: 'missing sessionId' }, 400);
-      const raw = await env.CLIPBOARD_KV.get(MULTIPART_SESSION_PREFIX + sessionId);
+      const raw = await kvGetRaw(env, MULTIPART_SESSION_PREFIX + sessionId);
       if (raw) {
         const session = JSON.parse(raw);
         await deleteManifestParts({ type: 'distributed-file', parts: session.parts }, env, new Set(), { adjustUsage: false });
-        await env.CLIPBOARD_KV.delete(MULTIPART_SESSION_PREFIX + sessionId);
+        await kvDelete(env, MULTIPART_SESSION_PREFIX + sessionId);
       }
       return jsonResponse({ ok: true });
     }
@@ -4061,7 +4202,7 @@ export default {
       }
     }
 
-    // Create folder in the KV-backed virtual path table.
+    // Create folder in the metadata-backed virtual path table.
     if (path === '/api/mkdir' && request.method === 'POST') {
       const { path: folderPath } = await request.json().catch(() => ({}));
       if (!folderPath) return new Response('Missing path', { status: 400 });
@@ -4079,5 +4220,8 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
+    } catch (err) {
+      return workerErrorResponse(request, err);
+    }
   }
 };
