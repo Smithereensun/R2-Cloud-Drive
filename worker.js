@@ -197,17 +197,21 @@ function renderHTML(content, title = 'R2 云盘') {
   [data-theme="dark"] .login-card { background: #1E1E1E; }
   [data-theme="dark"] .file-card-icon[style*="FFF8E1"] { background: #3C2E00 !important; }
 
+  html, body { height: 100vh; overflow: hidden; }
   body {
     font-family: var(--font-body);
     background: var(--background);
     color: var(--on-surface);
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
     -webkit-font-smoothing: antialiased;
   }
 
   /* ── Top App Bar ── */
   .app-bar {
-    position: sticky; top: 0; z-index: 100;
+    z-index: 100;
     height: 64px;
     background: var(--surface);
     border-bottom: 1px solid var(--outline);
@@ -269,7 +273,7 @@ function renderHTML(content, title = 'R2 云盘') {
   }
 
   /* ── Layout ── */
-  .layout { display: flex; min-height: calc(100vh - 64px); }
+  .layout { display: flex; flex: 1; min-height: 0; }
 
   /* ── Sidebar ── */
   .sidebar {
@@ -277,6 +281,9 @@ function renderHTML(content, title = 'R2 云盘') {
     background: var(--surface);
     padding: 8px 0;
     border-right: 1px solid var(--outline);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   .sidebar-section { padding: 8px 0; }
   .sidebar-label {
@@ -308,7 +315,7 @@ function renderHTML(content, title = 'R2 云盘') {
   .sidebar-divider { height: 1px; background: var(--outline); margin: 8px 16px; }
 
   /* ── Main Content ── */
-  .main { flex: 1; padding: 24px 32px; overflow-x: hidden; }
+  .main { flex: 1; padding: 24px 32px; overflow-x: hidden; overflow-y: auto; min-height: 0; }
 
   /* ── Breadcrumb ── */
   .breadcrumb {
@@ -527,7 +534,7 @@ function renderHTML(content, title = 'R2 云盘') {
 
   /* ── Login ── */
   .login-wrap {
-    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
     background: #F1F3F4;
     position: relative; overflow: hidden; padding: 24px;
   }
@@ -724,10 +731,55 @@ function renderHTML(content, title = 'R2 云盘') {
 
     /* ── Dark Mode Toggle ── */
   /* Icon is handled by JS toggleDarkMode() */
+
+  /* ── Foot Bar ── */
+  .foot-bar {
+    background: var(--surface);
+    border-top: 1px solid var(--outline);
+    padding: 12px 24px;
+    font-size: 12px;
+    color: var(--on-surface-variant);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .foot-bar a {
+    color: var(--primary);
+    text-decoration: none;
+  }
+  .foot-bar a:hover {
+    text-decoration: underline;
+  }
+  .foot-bar-sep {
+    color: var(--outline);
+    user-select: none;
+  }
+  @media (max-width: 768px) {
+    .foot-bar {
+      padding: 10px 16px;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .foot-bar-sep {
+      display: none;
+    }
+  }
 </style>
 </head>
 <body>
 ${content}
+
+<footer class="foot-bar">
+  <span>v1.1.0</span>
+  <span class="foot-bar-sep">|</span>
+  <a href="https://github.com/HandsomeMJZ" target="_blank" rel="noopener noreferrer">Github@HandsomeMJZ</a>
+  <span class="foot-bar-sep">|</span>
+  <span>用户存储之内容需符合当地法律法规，本程序不承担法律责任。</span>
+</footer>
 
 <div class="snackbar" id="snackbar">
   <span id="snackbar-msg"></span>
