@@ -6,7 +6,7 @@
 
 [API 对接说明文档](./API说明文档.md)
 
-![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F1.png)
+![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_2026-05-28_201024_028.png)
 
 ## 功能特性
 
