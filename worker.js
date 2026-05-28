@@ -126,8 +126,21 @@ function escapeAttr(value = '') {
   return String(value)
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function escapeHtml(value = '') {
+  return escapeAttr(value);
+}
+
+function jsString(value = '') {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function jsAttr(source = '') {
+  return escapeAttr(source);
 }
 
 function renderLogoIcon(iconUrl = '', fallbackIcon = 'cloud') {
@@ -486,6 +499,91 @@ function renderHTML(content, title = 'R2 云盘') {
   .upload-zone h4 { font-family: var(--font-display); font-size: 16px; margin-bottom: 4px; }
   .upload-zone p { font-size: 13px; color: var(--on-surface-variant); }
 
+  /* ── Preview Modal ── */
+  .preview-overlay {
+    position: fixed; inset: 0; z-index: 220;
+    background: rgba(0,0,0,.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+    opacity: 0; pointer-events: none;
+    transition: opacity .2s;
+  }
+  .preview-overlay.open { opacity: 1; pointer-events: all; }
+  .preview-modal {
+    background: var(--surface); border-radius: var(--radius-l);
+    width: 100%; max-width: 92vw;
+    height: 88vh;
+    box-shadow: var(--shadow-3);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .preview-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--outline);
+    flex-shrink: 0;
+  }
+  .preview-title {
+    font-family: var(--font-display);
+    font-size: 16px; font-weight: 500;
+    flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .preview-header-actions {
+    display: flex; align-items: center; gap: 4px;
+  }
+  .preview-body {
+    flex: 1; min-height: 0;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    background: var(--background);
+  }
+  .preview-body img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    padding: 8px;
+  }
+  .preview-body video {
+    max-width: 100%; max-height: 100%;
+    width: 100%; padding: 8px;
+  }
+  .preview-body audio {
+    width: 80%; padding: 0 24px;
+  }
+  .preview-body iframe,
+  .preview-body embed {
+    width: 100%; height: 100%;
+    border: none;
+  }
+  .preview-body .preview-text-wrap {
+    width: 100%; height: 100%;
+    overflow: auto;
+    padding: 16px 24px;
+  }
+  .preview-body .preview-text-wrap pre {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--on-surface);
+    margin: 0;
+  }
+  .preview-loading {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 12px;
+    color: var(--on-surface-variant);
+  }
+  .preview-unavailable {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 12px;
+    color: var(--on-surface-variant);
+    padding: 24px; text-align: center;
+  }
+  .preview-unavailable .material-icons-round { font-size: 64px; opacity: .4; }
+  .preview-unavailable h3 { font-family: var(--font-display); font-size: 18px; font-weight: 400; margin: 0; }
+  .preview-unavailable p { font-size: 14px; margin: 0; max-width: 360px; }
+
   /* ── Progress ── */
   .progress-list { display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; }
   .progress-item { display: flex; flex-direction: column; gap: 4px; }
@@ -774,7 +872,7 @@ function renderHTML(content, title = 'R2 云盘') {
 ${content}
 
 <footer class="foot-bar">
-  <span>v1.1.0</span>
+  <span>v1.1.3</span>
   <span class="foot-bar-sep">|</span>
   <a href="https://github.com/HandsomeMJZ" target="_blank" rel="noopener noreferrer">Github@HandsomeMJZ</a>
   <span class="foot-bar-sep">|</span>
@@ -784,6 +882,29 @@ ${content}
 <div class="snackbar" id="snackbar">
   <span id="snackbar-msg"></span>
   <button class="snackbar-action" onclick="hideSnackbar()" style="display:none" id="snackbar-action-btn"></button>
+</div>
+
+<div class="preview-overlay" id="previewOverlay" onclick="if(event.target===this)closePreview()">
+  <div class="preview-modal">
+    <div class="preview-header">
+      <span class="material-icons-round" style="color:var(--primary)">visibility</span>
+      <span class="preview-title" id="previewTitle">预览</span>
+      <div class="preview-header-actions">
+        <button class="icon-btn" id="previewDlBtn" title="下载" onclick="doPreviewDownload()">
+          <span class="material-icons-round">download</span>
+        </button>
+        <button class="icon-btn" onclick="closePreview()" title="关闭">
+          <span class="material-icons-round">close</span>
+        </button>
+      </div>
+    </div>
+    <div class="preview-body" id="previewBody">
+      <div class="preview-loading">
+        <span class="material-icons-round" style="font-size:48px;opacity:.4">hourglass_empty</span>
+        <p>加载中...</p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="context-menu" id="contextMenu">
@@ -797,6 +918,9 @@ ${content}
     <span class="material-icons-round">content_paste</span> 粘贴
   </div>
   <div class="context-menu-divider"></div>
+  <div class="context-menu-item" onclick="ctxPreview()">
+    <span class="material-icons-round">visibility</span> 预览
+  </div>
   <div class="context-menu-item" onclick="ctxDownload()">
     <span class="material-icons-round">download</span> 下载
   </div>
@@ -1009,15 +1133,126 @@ function setView(mode) {
   if (grid && list) { grid.style.display = mode === 'grid' ? '' : 'none'; list.style.display = mode === 'list' ? '' : 'none'; }
 }
 
+// ── Preview ──
+let previewPath = '';
+let previewName = '';
+
+function getPreviewType(name) {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  const imageExts = ['jpg','jpeg','png','gif','webp','svg','bmp','ico'];
+  const videoExts = ['mp4','webm','ogg','avi','mov','mkv'];
+  const audioExts = ['mp3','wav','flac','aac','m4a','opus'];
+  const textExts = ['txt','md','html','css','js','ts','py','java','c','cpp','h','hpp','go','rs','rb','php','json','xml','yaml','yml','log','sh','bash','sql','conf','ini','cfg','toml','env','gitignore','Makefile','Dockerfile','cmake','gradle','svelte','vue','jsx','tsx','mjs','cjs'];
+  if (imageExts.includes(ext)) return 'image';
+  if (videoExts.includes(ext)) return 'video';
+  if (audioExts.includes(ext)) return 'audio';
+  if (ext === 'pdf') return 'pdf';
+  if (textExts.includes(ext)) return 'text';
+  if (['doc','docx','xls','xlsx','ppt','pptx'].includes(ext)) return 'office';
+  return null;
+}
+
+function openPreview(path, name) {
+  previewPath = path;
+  previewName = name;
+  const overlay = document.getElementById('previewOverlay');
+  document.getElementById('previewTitle').textContent = name;
+  overlay.classList.add('open');
+  loadPreview(path, name);
+}
+
+function closePreview() {
+  const overlay = document.getElementById('previewOverlay');
+  if (!overlay || !overlay.classList.contains('open')) return;
+  overlay.classList.remove('open');
+  const body = document.getElementById('previewBody');
+  if (body) {
+    body.innerHTML = '<div class="preview-loading"><span class="material-icons-round" style="font-size:48px;opacity:.4">hourglass_empty</span><p>加载中...</p></div>';
+  }
+  previewPath = '';
+  previewName = '';
+}
+
+function doPreviewDownload() {
+  if (previewPath && previewName) {
+    const size = getFileSizeByName(previewName);
+    startDownload(previewPath, size || 0);
+  }
+}
+
+function loadPreview(path, name) {
+  var body = document.getElementById('previewBody');
+  if (!body) return;
+  var type = getPreviewType(name);
+  var url = downloadUrl(path);
+  body.innerHTML = '';
+
+  if (type === 'image') {
+    var img = document.createElement('img');
+    img.src = url;
+    img.alt = name;
+    img.onerror = function() {
+      body.innerHTML = '<div class="preview-unavailable"><span class="material-icons-round">broken_image</span><h3>图片加载失败</h3><p>请尝试下载查看</p></div>';
+    };
+    body.appendChild(img);
+
+  } else if (type === 'video') {
+    var vid = document.createElement('video');
+    vid.src = url;
+    vid.controls = true;
+    vid.autoplay = true;
+    vid.style.cssText = 'max-height:100%;max-width:100%';
+    body.appendChild(vid);
+
+  } else if (type === 'audio') {
+    var aud = document.createElement('audio');
+    aud.src = url;
+    aud.controls = true;
+    aud.autoplay = true;
+    aud.style.cssText = 'width:100%';
+    body.appendChild(aud);
+
+  } else if (type === 'pdf') {
+    var iframe = document.createElement('iframe');
+    iframe.src = url;
+    iframe.title = name;
+    body.appendChild(iframe);
+
+  } else if (type === 'text') {
+    body.innerHTML = '<div class="preview-text-wrap"><pre id="previewTextContent">加载中...</pre></div>';
+    fetch(url)
+      .then(function(r) { if (!r.ok) throw new Error('Failed to load'); return r.text(); })
+      .then(function(text) {
+        var el = document.getElementById('previewTextContent');
+        if (el) el.textContent = text;
+      })
+      .catch(function() {
+        var el = document.getElementById('previewTextContent');
+        if (el) el.textContent = '文件加载失败，请尝试下载查看。';
+      });
+
+  } else if (type === 'office') {
+    body.innerHTML = '<div class="preview-unavailable"><span class="material-icons-round">description</span><h3>暂不支持在线预览</h3><p>Office / WPS 文档暂不支持在线预览，请下载后使用本地软件查看。</p><button class="fab" style="box-shadow:none;margin-top:8px" onclick="doPreviewDownload()"><span class="material-icons-round">download</span> 下载文件</button></div>';
+
+  } else {
+    body.innerHTML = '<div class="preview-unavailable"><span class="material-icons-round">insert_drive_file</span><h3>暂不支持预览</h3><p>此文件类型暂不支持在线预览，请下载查看。</p><button class="fab" style="box-shadow:none;margin-top:8px" onclick="doPreviewDownload()"><span class="material-icons-round">download</span> 下载文件</button></div>';
+  }
+}
+
 // ── Selection ──
-// ── File Click: single click selects, double click downloads
+// ── File Click: single click selects, double click previews (or downloads for unsupported types)
 function handleFileClick(event, name) {
   if (event.detail === 1) {
     toggleSelect(name, event.currentTarget);
   } else if (event.detail === 2) {
     const path = currentPath ? currentPath + '/' + name : name;
-    const size = Number(event.currentTarget?.dataset.size || getFileSizeByName(name) || 0);
-    startDownload(path, size);
+    const type = getPreviewType(name);
+    if (type) {
+      openPreview(path, name);
+    } else {
+      const size = Number(event.currentTarget?.dataset.size || getFileSizeByName(name) || 0);
+      startDownload(path, size);
+    }
   }
 }
 
@@ -1341,10 +1576,12 @@ function renderStorageDetails(nodes) {
 function deleteSelected() {
   if (!selectedFiles.size) return;
   if (!confirm('确定删除选中的 ' + selectedFiles.size + ' 个文件？')) return;
-  Promise.all([...selectedFiles].map(name => {
-    const path = currentPath ? currentPath + '/' + name : name;
-    return fetch('/api/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
-  })).then(() => { showSnackbar('已删除 ' + selectedFiles.size + ' 个文件'); location.reload(); });
+  const paths = [...selectedFiles].map(name => currentPath ? currentPath + '/' + name : name);
+  fetch('/api/delete-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths })
+  }).then(r => r.ok ? (showSnackbar('已删除 ' + selectedFiles.size + ' 个文件'), location.reload()) : showSnackbar('删除失败'));
 }
 
 // ── Context Menu ──
@@ -1359,7 +1596,14 @@ function showCtxMenu(e, name) {
   menu.style.left = x + 'px'; menu.style.top = y + 'px';
 }
 document.addEventListener('click', () => document.getElementById('contextMenu')?.classList.remove('open'));
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { clearSelection(); document.getElementById('contextMenu')?.classList.remove('open'); } });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    var po = document.getElementById('previewOverlay');
+    if (po && po.classList.contains('open')) { closePreview(); return; }
+    clearSelection();
+    document.getElementById('contextMenu')?.classList.remove('open');
+  }
+});
 
 function ctxItems() {
   if (!ctxTarget) return [];
@@ -1388,6 +1632,17 @@ async function ctxCut() {
 }
 function ctxPaste() {
   pasteFiles();
+}
+function ctxPreview() {
+  if (!ctxTarget) return;
+  const path = currentPath ? currentPath + '/' + ctxTarget : ctxTarget;
+  openPreview(path, ctxTarget);
+}
+function previewSelected() {
+  if (selectedFiles.size !== 1) { showSnackbar('请只选择一个文件进行预览'); return; }
+  const name = [...selectedFiles][0];
+  const path = currentPath ? currentPath + '/' + name : name;
+  openPreview(path, name);
 }
 function ctxDownload() {
   if (!ctxTarget) return;
@@ -1432,7 +1687,7 @@ function handleDragOver(e) { e.preventDefault(); document.querySelector('.upload
 function handleDragLeave() { document.querySelector('.upload-zone')?.classList.remove('drag-over'); }
 function handleFileInput(e) { uploadFiles(e.target.files); }
 
-const DIRECT_UPLOAD_LIMIT = 90 * 1024 * 1024;
+const DIRECT_UPLOAD_LIMIT = 512 * 1024; // 512 KB - 小于此大小的文件直传主 R2，大于则走分布式存储
 const MULTIPART_DEFAULT_CHUNK = 32 * 1024 * 1024;
 const MULTIPART_MAX_CHUNK = 90 * 1024 * 1024;
 const MULTIPART_MAX_PARTS = 10000;
@@ -1471,8 +1726,13 @@ function uploadSingleFile(file, path, fill, pctSpan) {
   if (file.size <= DIRECT_UPLOAD_LIMIT) {
     return uploadDirect(file, path, fill, pctSpan);
   }
+  // 优先走分布式存储，失败时给出明确提示再回退到 R2 分片上传
   return uploadDistributed(file, path, fill, pctSpan)
-    .catch(() => uploadMultipart(file, path, fill, pctSpan));
+    .catch(err => {
+      console.warn('[分布式上传失败，回退到主 R2 分片上传]', err?.message || err);
+      showSnackbar('分布式存储不可用，使用主 R2 上传', '', null);
+      return uploadMultipart(file, path, fill, pctSpan);
+    });
 }
 
 function uploadErrorMessage(xhr, fallback = 'upload failed') {
@@ -1621,9 +1881,19 @@ async function uploadDistributed(file, path, fill, pctSpan) {
       parts: totalParts
     })
   });
-  if (!initRes.ok) throw new Error(await fetchErrorMessage(initRes, 'distributed storage unavailable'));
+  if (!initRes.ok) {
+    const errMsg = await fetchErrorMessage(initRes, '分布式存储不可用');
+    throw new Error(errMsg + (initRes.status === 409 ? '（文件过小）' : ''));
+  }
   const session = await initRes.json();
   const sessionId = session.sessionId;
+
+  // 打印分片分布情况到控制台，便于确认是否真正分布
+  if (session.distribution && session.distribution.length > 0) {
+    const totalBytes = session.distribution.reduce((s, d) => s + d.bytes, 0);
+    console.log('[分布式存储] 分片分布 (' + formatSize(totalBytes) + ')：',
+      session.distribution.map(d => d.nodeName + ': ' + d.parts + ' 个分片, ' + formatSize(d.bytes)).join(' | '));
+  }
 
   let uploadedBytes = 0;
   try {
@@ -1671,9 +1941,9 @@ function uploadDistributedPart(partInfo, chunk, onProgress) {
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error('distributed part failed'));
+      else reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 上传失败 (HTTP ' + xhr.status + ')：' + (xhr.responseText || '').slice(0, 120)));
     };
-    xhr.onerror = () => reject(new Error('distributed part failed'));
+    xhr.onerror = () => reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 网络错误：' + partInfo.uploadUrl));
     xhr.send(chunk);
   });
 }
@@ -1687,36 +1957,68 @@ function closeStorageNodes() {
 }
 async function loadStorageNodes() {
   const list = document.getElementById('storageNodeList');
-  if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载中...</div></div></div>';
+  if (!list) return;
+  list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载中...</div></div></div>';
   try {
     const res = await fetch('/api/storage-nodes');
-    const data = await res.json();
-    renderStorageNodes(data.nodes || []);
-  } catch {
-    if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载失败</div></div></div>';
+    // 尝试解析 JSON，如果响应不是 JSON（如 Worker 崩溃返回的 HTML），则优雅降级
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      // 响应不是有效 JSON，可能服务器出错
+      if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">服务器响应异常，请刷新页面重试</div></div></div>';
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(data?.error || 'HTTP ' + res.status);
+    }
+    renderStorageNodes(Array.isArray(data?.nodes) ? data.nodes : []);
+  } catch (err) {
+    console.warn('loadStorageNodes failed:', err?.message || err);
+    if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载失败：' + escapeHtml((err?.message || '网络错误').slice(0, 40)) + '</div></div></div>';
   }
 }
 function renderStorageNodes(nodes) {
   const list = document.getElementById('storageNodeList');
   if (!list) return;
   if (!nodes.length) {
-    list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">暂无存储节点，大文件将上传到主账号 R2</div></div></div>';
+    list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">暂无存储节点，大于 512KB 的文件将分布到外部节点</div></div></div>';
     return;
   }
-  list.innerHTML = nodes.map(node =>
-    '<div class="node-row">' +
-      '<div class="node-row-main">' +
-        '<div class="node-row-title">' + escapeHtml(node.name || node.id) + '</div>' +
-        '<div class="node-row-sub">' + escapeHtml(node.url) + ' · ' + (node.enabled ? '启用' : '停用') + '</div>' +
-      '</div>' +
-      '<button class="icon-btn" title="测试" onclick="testStorageNode(\\'' + node.id + '\\')">' +
-        '<span class="material-icons-round">network_check</span>' +
-      '</button>' +
-      '<button class="icon-btn" title="删除" onclick="deleteStorageNode(\\'' + node.id + '\\')">' +
-        '<span class="material-icons-round">delete_outline</span>' +
-      '</button>' +
-    '</div>'
-  ).join('');
+  list.innerHTML = '';
+  nodes.forEach(node => {
+    const row = document.createElement('div');
+    row.className = 'node-row';
+    const main = document.createElement('div');
+    main.className = 'node-row-main';
+    const title = document.createElement('div');
+    title.className = 'node-row-title';
+    title.textContent = node.name || node.id || '';
+    const sub = document.createElement('div');
+    sub.className = 'node-row-sub';
+    sub.textContent = (node.url || '') + ' \u00B7 ' + (node.enabled !== false ? '启用' : '停用');
+    main.append(title, sub);
+
+    const testBtn = document.createElement('button');
+    testBtn.className = 'icon-btn';
+    testBtn.title = '测试';
+    testBtn.innerHTML = '<span class="material-icons-round">network_check</span>';
+    testBtn.addEventListener('click', function() {
+      testStorageNode(node.id);
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'icon-btn';
+    delBtn.title = '删除';
+    delBtn.innerHTML = '<span class="material-icons-round">delete_outline</span>';
+    delBtn.addEventListener('click', function() {
+      deleteStorageNode(node.id);
+    });
+
+    row.append(main, testBtn, delBtn);
+    list.appendChild(row);
+  });
 }
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -1853,7 +2155,7 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
       const isLast = i === pathParts.length - 1;
       return `<div class="breadcrumb-item">
         <span class="material-icons-round breadcrumb-sep">chevron_right</span>
-        ${isLast ? `<span class="breadcrumb-current">${part}</span>` : `<a class="breadcrumb-link" href="${href}">${part}</a>`}
+        ${isLast ? `<span class="breadcrumb-current">${escapeHtml(part)}</span>` : `<a class="breadcrumb-link" href="${escapeAttr(href)}">${escapeHtml(part)}</a>`}
       </div>`;
     }).join('')}
   </nav>`;
@@ -1935,24 +2237,25 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
     <div id="fileGrid" class="file-grid">
       ${folders.map(name => {
         const href = sharedBase + '/?path=' + encodeURIComponent(currentPath ? currentPath + '/' + name : name);
-        return `<div class="file-card" onclick="location.href='${href}'">
+        return `<div class="file-card" onclick="${jsAttr(`location.href=${jsString(href)}`)}">
           <div class="file-card-icon" style="background:#FFF8E1">
             <span class="material-icons-round" style="color:#F9AB00;font-size:32px">folder</span>
           </div>
-          <div class="file-card-name">${name}</div>
+          <div class="file-card-name">${escapeHtml(name)}</div>
           <div class="file-card-meta"><span>文件夹</span></div>
         </div>`;
       }).join('')}
             ${files.map(file => {
         const { icon, color } = getFileIcon(file.name);
                 const dlPath = sharedPrefix + '/' + (currentPath ? currentPath + '/' + file.name : file.name);
-        return `<div class="file-card" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">
+        const size = Number(file.size) || 0;
+        return `<div class="file-card" onclick="${jsAttr(`startDownload(${jsString(dlPath)}, ${size})`)}">
           <div class="file-card-icon" style="background:${color}18">
             <span class="material-icons-round" style="color:${color};font-size:32px">${icon}</span>
           </div>
-          <div class="file-card-name" title="${file.name}">${file.name}</div>
+          <div class="file-card-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</div>
           <div class="file-card-meta">
-            <span>${formatSize(file.size)}</span>
+            <span>${formatSize(size)}</span>
             <span>${formatDate(file.uploaded)}</span>
           </div>
         </div>`;
@@ -1976,7 +2279,7 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
             return `<tr>
               <td><div class="file-row-icon">
                 <span class="material-icons-round" style="color:#F9AB00;font-size:22px">folder</span>
-                <span class="file-row-name" onclick="location.href='${href}'">${name}</span>
+                <span class="file-row-name" onclick="${jsAttr(`location.href=${jsString(href)}`)}">${escapeHtml(name)}</span>
               </div></td>
               <td class="file-row-meta">—</td>
               <td class="file-row-meta">—</td>
@@ -1986,15 +2289,16 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
           ${files.map(file => {
             const { icon, color } = getFileIcon(file.name);
                         const dlPath = sharedPrefix + '/' + (currentPath ? currentPath + '/' + file.name : file.name);
+            const size = Number(file.size) || 0;
             return `<tr>
               <td><div class="file-row-icon">
                 <span class="material-icons-round" style="color:${color};font-size:22px">${icon}</span>
-                <span class="file-row-name" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">${file.name}</span>
+                <span class="file-row-name" onclick="${jsAttr(`startDownload(${jsString(dlPath)}, ${size})`)}">${escapeHtml(file.name)}</span>
               </div></td>
-              <td class="file-row-meta">${formatSize(file.size)}</td>
+              <td class="file-row-meta">${formatSize(size)}</td>
               <td class="file-row-meta">${formatDate(file.uploaded)}</td>
               <td>
-                <button class="icon-btn" title="下载" onclick="startDownload(decodeURIComponent('${encodeURIComponent(dlPath)}'), ${file.size || 0})">
+                <button class="icon-btn" title="下载" onclick="${jsAttr(`startDownload(${jsString(dlPath)}, ${size})`)}">
                   <span class="material-icons-round">download</span>
                 </button>
               </td>
@@ -2024,22 +2328,22 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       const isLast = i === pathParts.length - 1;
       return `<div class="breadcrumb-item">
         <span class="material-icons-round breadcrumb-sep">chevron_right</span>
-        ${isLast ? `<span class="breadcrumb-current">${part}</span>` : `<a class="breadcrumb-link" href="${href}">${part}</a>`}
+        ${isLast ? `<span class="breadcrumb-current">${escapeHtml(part)}</span>` : `<a class="breadcrumb-link" href="${escapeAttr(href)}">${escapeHtml(part)}</a>`}
       </div>`;
     }).join('')}
   </nav>`;
 
     const renderFolderCard = (name) => {
     const href = '/?path=' + encodeURIComponent(currentPath ? currentPath + '/' + name : name);
-    return `<div class="file-card" onclick="handleFolderClick(event,'${name}','${href}')"
-        oncontextmenu="showCtxMenu(event,'${name}')">
+    return `<div class="file-card" onclick="${jsAttr(`handleFolderClick(event, ${jsString(name)}, ${jsString(href)})`)}"
+        oncontextmenu="${jsAttr(`showCtxMenu(event, ${jsString(name)})`)}">
       <div class="file-card-icon" style="background:#FFF8E1">
         <span class="material-icons-round" style="color:#F9AB00;font-size:32px">folder</span>
       </div>
-      <div class="file-card-name">${name}</div>
+      <div class="file-card-name">${escapeHtml(name)}</div>
       <div class="file-card-meta"><span>文件夹</span></div>
       <div class="file-card-actions">
-        <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${name}')">
+        <button class="icon-btn" title="更多" onclick="${jsAttr(`event.stopPropagation();showCtxMenu(event, ${jsString(name)})`)}">
           <span class="material-icons-round">more_vert</span>
         </button>
       </div>
@@ -2049,21 +2353,22 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     const renderFileCard = (file) => {
     const { icon, color } = getFileIcon(file.name);
     const path = currentPath ? currentPath + '/' + file.name : file.name;
-    return `<div class="file-card" data-name="${file.name}" data-size="${file.size}" onclick="handleFileClick(event,'${file.name}')"
-        oncontextmenu="showCtxMenu(event,'${file.name}')">
+    const size = Number(file.size) || 0;
+    return `<div class="file-card" data-name="${escapeAttr(file.name)}" data-size="${size}" onclick="${jsAttr(`handleFileClick(event, ${jsString(file.name)})`)}"
+        oncontextmenu="${jsAttr(`showCtxMenu(event, ${jsString(file.name)})`)}">
       <div class="file-card-icon" style="background:${color}18">
         <span class="material-icons-round" style="color:${color};font-size:32px">${icon}</span>
       </div>
-      <div class="file-card-name" title="${file.name}">${file.name}</div>
+      <div class="file-card-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</div>
       <div class="file-card-meta">
-        <span>${formatSize(file.size)}</span>
+        <span>${formatSize(size)}</span>
         <span>${formatDate(file.uploaded)}</span>
       </div>
       <div class="file-card-actions">
-        <button class="icon-btn" title="下载" onclick="event.stopPropagation();startDownload(decodeURIComponent('${encodeURIComponent(path)}'), ${file.size || 0})">
+        <button class="icon-btn" title="下载" onclick="${jsAttr(`event.stopPropagation();startDownload(${jsString(path)}, ${size})`)}">
           <span class="material-icons-round">download</span>
         </button>
-        <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${file.name}')">
+        <button class="icon-btn" title="更多" onclick="${jsAttr(`event.stopPropagation();showCtxMenu(event, ${jsString(file.name)})`)}">
           <span class="material-icons-round">more_vert</span>
         </button>
       </div>
@@ -2072,15 +2377,15 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
 
     const renderFolderRow = (name) => {
     const href = '/?path=' + encodeURIComponent(currentPath ? currentPath + '/' + name : name);
-    return `<tr data-name="${name}" data-size="0" data-date="" onclick="handleFolderClick(event,'${name}','${href}')">
+    return `<tr data-name="${escapeAttr(name)}" data-size="0" data-date="" onclick="${jsAttr(`handleFolderClick(event, ${jsString(name)}, ${jsString(href)})`)}">
       <td><div class="file-row-icon">
         <span class="material-icons-round" style="color:#F9AB00;font-size:22px">folder</span>
-        <span class="file-row-name">${name}</span>
+        <span class="file-row-name">${escapeHtml(name)}</span>
       </div></td>
       <td class="file-row-meta">—</td>
       <td class="file-row-meta">—</td>
       <td><div class="file-row-actions">
-        <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${name}')">
+        <button class="icon-btn" title="更多" onclick="${jsAttr(`event.stopPropagation();showCtxMenu(event, ${jsString(name)})`)}">
           <span class="material-icons-round">more_vert</span>
         </button>
       </div></td>
@@ -2090,18 +2395,19 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     const renderFileRow = (file) => {
     const { icon, color } = getFileIcon(file.name);
     const path = currentPath ? currentPath + '/' + file.name : file.name;
-    return `<tr data-name="${file.name}" data-size="${file.size}" data-date="${file.uploaded || ''}" onclick="handleFileClick(event,'${file.name}')">
+    const size = Number(file.size) || 0;
+    return `<tr data-name="${escapeAttr(file.name)}" data-size="${size}" data-date="${escapeAttr(file.uploaded || '')}" onclick="${jsAttr(`handleFileClick(event, ${jsString(file.name)})`)}">
       <td><div class="file-row-icon">
         <span class="material-icons-round" style="color:${color};font-size:22px">${icon}</span>
-        <span class="file-row-name">${file.name}</span>
+        <span class="file-row-name">${escapeHtml(file.name)}</span>
       </div></td>
-      <td class="file-row-meta">${formatSize(file.size)}</td>
+      <td class="file-row-meta">${formatSize(size)}</td>
       <td class="file-row-meta">${formatDate(file.uploaded)}</td>
       <td><div class="file-row-actions">
-        <button class="icon-btn" title="下载" onclick="event.stopPropagation();startDownload(decodeURIComponent('${encodeURIComponent(path)}'), ${file.size || 0})">
+        <button class="icon-btn" title="下载" onclick="${jsAttr(`event.stopPropagation();startDownload(${jsString(path)}, ${size})`)}">
           <span class="material-icons-round">download</span>
         </button>
-        <button class="icon-btn" title="更多" onclick="event.stopPropagation();showCtxMenu(event,'${file.name}')">
+        <button class="icon-btn" title="更多" onclick="${jsAttr(`event.stopPropagation();showCtxMenu(event, ${jsString(file.name)})`)}">
           <span class="material-icons-round">more_vert</span>
         </button>
       </div></td>
@@ -2204,6 +2510,9 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
         <span class="material-icons-round">content_paste</span><span>粘贴</span>
       </button>
       <div class="action-bar-divider"></div>
+      <button class="action-btn" onclick="previewSelected()" title="预览">
+        <span class="material-icons-round">visibility</span><span>预览</span>
+      </button>
       <button class="action-btn" onclick="renameSelected()" title="重命名">
         <span class="material-icons-round">drive_file_rename_outline</span><span>重命名</span>
       </button>
@@ -2379,7 +2688,7 @@ const MANIFEST_VERSION = 1;
 const DOWNLOAD_RANGE_SIZE_BYTES = 32 * 1024 * 1024;
 const DOWNLOAD_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const DOWNLOAD_NODE_FETCH_RETRIES = 3;
-const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 100 * 1024 * 1024;
+const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 512 * 1024; // 512 KB - 超过此大小的文件使用分布式存储
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -2413,6 +2722,20 @@ function jsonResponse(data, status = 200) {
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const list = Array.from(items || []);
+  const concurrency = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+  let next = 0;
+  const results = new Array(list.length);
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (next < list.length) {
+      const index = next++;
+      results[index] = await mapper(list[index], index);
+    }
+  }));
+  return results;
 }
 
 function getDownloadRangeSize(env) {
@@ -2559,6 +2882,40 @@ function d1KvStore(DB) {
     async delete(key) {
       await ensureD1KvSchema(DB);
       await DB.prepare(`DELETE FROM ${D1_KV_TABLE} WHERE "key" = ?`).bind(key).run();
+    },
+    async batchDelete(keys) {
+      const unique = [...new Set(keys.filter(Boolean))];
+      if (!unique.length) return;
+      await ensureD1KvSchema(DB);
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+        const chunk = unique.slice(i, i + BATCH_SIZE);
+        const stmts = chunk.map(k =>
+          DB.prepare(`DELETE FROM ${D1_KV_TABLE} WHERE "key" = ?`).bind(k)
+        );
+        await DB.batch(stmts);
+      }
+    },
+    async batchGetJson(keys) {
+      const unique = [...new Set(keys.filter(Boolean))];
+      if (!unique.length) return new Map();
+      await ensureD1KvSchema(DB);
+      const now = Math.floor(Date.now() / 1000);
+      const BATCH_SIZE = 100;
+      const result = new Map();
+      for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+        const chunk = unique.slice(i, i + BATCH_SIZE);
+        const stmts = chunk.map(k =>
+          DB.prepare(`SELECT "value", expires_at FROM ${D1_KV_TABLE} WHERE "key" = ? AND (expires_at IS NULL OR expires_at > ?)`).bind(k, now)
+        );
+        const results = await DB.batch(stmts);
+        results.forEach((res, idx) => {
+          if (res.results && res.results.length > 0) {
+            try { result.set(chunk[idx], JSON.parse(res.results[0].value)); } catch {}
+          }
+        });
+      }
+      return result;
     },
     async list({ prefix = '', cursor = '', limit = 1000 } = {}) {
       await ensureD1KvSchema(DB);
@@ -2801,6 +3158,34 @@ async function deleteDirectoryIndex(env, path) {
   await requireFsKv(env).delete(directoryIndexKey(clean));
 }
 
+async function removeDeletedItemsFromParentIndexes(env, filePaths = [], folderPaths = []) {
+  const updates = new Map();
+  const getUpdate = path => {
+    const clean = assertVirtualPath(path, { allowRoot: true });
+    if (!updates.has(clean)) updates.set(clean, { files: new Set(), folders: new Set() });
+    return updates.get(clean);
+  };
+
+  for (const filePath of filePaths) {
+    const clean = assertVirtualPath(filePath);
+    getUpdate(virtualParentPath(clean)).files.add(virtualPathName(clean));
+  }
+
+  const folderSet = new Set(folderPaths.map(path => assertVirtualPath(path)));
+  for (const folderPath of folderSet) {
+    const parent = virtualParentPath(folderPath);
+    if (folderSet.has(parent)) continue;
+    getUpdate(parent).folders.add(virtualPathName(folderPath));
+  }
+
+  await mapWithConcurrency([...updates.entries()], 8, async ([parent, change]) => {
+    await mutateDirectoryIndex(env, parent, index => {
+      if (change.files.size) index.files = index.files.filter(item => !change.files.has(item.name));
+      if (change.folders.size) index.folders = index.folders.filter(item => !change.folders.has(item));
+    });
+  });
+}
+
 async function getFileEntry(env, path) {
   const clean = assertVirtualPath(path);
   const entry = await kvGetJson(env, fileEntryKey(clean));
@@ -2904,6 +3289,26 @@ function safeStorageName(name = 'file') {
 
 async function hasStorageReference(env, storageKey, excludingPaths = new Set()) {
   if (!storageKey) return false;
+  const DB = env.DB;
+  if (DB) {
+    await ensureD1KvSchema(DB);
+    const now = Math.floor(Date.now() / 1000);
+    const bound = prefixUpperBound(FS_FILE_PREFIX);
+    if (excludingPaths.size === 0) {
+      const row = await DB.prepare(
+        `SELECT 1 FROM ${D1_KV_TABLE} WHERE "key" >= ? AND "key" < ? AND json_extract("value", '$.storageKey') = ? AND (expires_at IS NULL OR expires_at > ?) LIMIT 1`
+      ).bind(FS_FILE_PREFIX, bound, storageKey, now).first();
+      return !!row;
+    }
+    const result = await DB.prepare(
+      `SELECT "key" FROM ${D1_KV_TABLE} WHERE "key" >= ? AND "key" < ? AND json_extract("value", '$.storageKey') = ? AND (expires_at IS NULL OR expires_at > ?)`
+    ).bind(FS_FILE_PREFIX, bound, storageKey, now).all();
+    for (const row of (result.results || [])) {
+      const path = row.key.startsWith(FS_FILE_PREFIX) ? row.key.slice(FS_FILE_PREFIX.length) : '';
+      if (path && !excludingPaths.has(normalizeVirtualPath(path))) return true;
+    }
+    return false;
+  }
   const entries = await listAllFileEntries(env, '');
   for (const entry of entries) {
     if (entry?.storageKey === storageKey && !excludingPaths.has(normalizeVirtualPath(entry.path))) {
@@ -2911,6 +3316,38 @@ async function hasStorageReference(env, storageKey, excludingPaths = new Set()) 
     }
   }
   return false;
+}
+
+async function findReferencedStorageKeysD1(env, storageKeys) {
+  if (!storageKeys.length) return new Set();
+  const DB = env.DB;
+  if (!DB) {
+    const allEntries = await listAllFileEntries(env, '');
+    const referenced = new Set();
+    const keySet = new Set(storageKeys);
+    for (const entry of allEntries) {
+      if (entry?.storageKey && keySet.has(entry.storageKey)) referenced.add(entry.storageKey);
+    }
+    return referenced;
+  }
+  await ensureD1KvSchema(DB);
+  const now = Math.floor(Date.now() / 1000);
+  const bound = prefixUpperBound(FS_FILE_PREFIX);
+  const referenced = new Set();
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < storageKeys.length; i += BATCH_SIZE) {
+    const chunk = storageKeys.slice(i, i + BATCH_SIZE);
+    const statements = chunk.map(sk =>
+      DB.prepare(
+        `SELECT 1 FROM ${D1_KV_TABLE} WHERE "key" >= ? AND "key" < ? AND json_extract("value", '$.storageKey') = ? AND (expires_at IS NULL OR expires_at > ?) LIMIT 1`
+      ).bind(FS_FILE_PREFIX, bound, sk, now)
+    );
+    const results = await DB.batch(statements);
+    results.forEach((result, idx) => {
+      if (result.results && result.results.length > 0) referenced.add(chunk[idx]);
+    });
+  }
+  return referenced;
 }
 
 async function createStorageKeyForPath(env, R2, logicalPath, prefix = 'file') {
@@ -2928,7 +3365,11 @@ async function createStorageKeyForPath(env, R2, logicalPath, prefix = 'file') {
 async function cleanupUnreferencedStorage(env, R2, entry) {
   if (!entry?.storageKey) return;
   if (await hasStorageReference(env, entry.storageKey)) return;
+  await cleanupStorageEntry(env, R2, entry);
+}
 
+async function cleanupStorageEntry(env, R2, entry) {
+  if (!entry?.storageKey) return;
   const obj = await R2.get(entry.storageKey);
   const manifest = await readManifestObject(obj);
   if (isManifestFile(manifest)) await deleteManifestParts(manifest, env);
@@ -2957,10 +3398,8 @@ async function listAllFileEntries(env, folderPath = '') {
   const clean = assertVirtualPath(folderPath, { allowRoot: true });
   const index = await getDirectoryIndex(env, clean);
   const directFiles = await Promise.all(index.files.map(file => getFileEntry(env, joinVirtualPath(clean, file.name))));
-  const nestedFiles = [];
-  for (const folder of index.folders) {
-    nestedFiles.push(...await listAllFileEntries(env, joinVirtualPath(clean, folder)));
-  }
+  const nestedGroups = await mapWithConcurrency(index.folders, 8, folder => listAllFileEntries(env, joinVirtualPath(clean, folder)));
+  const nestedFiles = nestedGroups.flat();
   return [
     ...directFiles.filter(Boolean),
     ...nestedFiles
@@ -2970,12 +3409,11 @@ async function listAllFileEntries(env, folderPath = '') {
 async function listFolderPaths(env, folderPath = '') {
   const clean = assertVirtualPath(folderPath, { allowRoot: true });
   const index = await getDirectoryIndex(env, clean);
-  const folders = [];
-  for (const folder of index.folders) {
+  const folderGroups = await mapWithConcurrency(index.folders, 8, async folder => {
     const childPath = joinVirtualPath(clean, folder);
-    folders.push(childPath, ...await listFolderPaths(env, childPath));
-  }
-  return folders;
+    return [childPath, ...await listFolderPaths(env, childPath)];
+  });
+  return folderGroups.flat();
 }
 
 async function getVirtualPathSource(env, path, allowMissing = false) {
@@ -3112,33 +3550,211 @@ async function moveVirtualPath(env, R2, from, to) {
   return { type: 'folder', moved: source.files.length };
 }
 
-async function deleteVirtualPath(env, R2, path) {
-  const source = await getVirtualPathSource(env, path, true);
-  if (source.type === 'missing') return { deleted: 0 };
+/**
+ * Lightweight path collection: traverses directory indexes without reading
+ * individual file entries from KV. Much faster than getVirtualPathSource for
+ * large folders when only paths (not storage keys) are needed.
+ */
+async function collectVirtualPathPaths(env, folderPath) {
+  const clean = assertVirtualPath(folderPath, { allowRoot: true });
+  const index = await getDirectoryIndex(env, clean);
 
-  const deletedEntries = source.files;
-  if (source.type === 'file') {
-    await requireFsKv(env).delete(fileEntryKey(source.path));
-    await removeFileFromDirectoryIndex(env, source.path);
+  const filePaths = [];
+  const folderPaths = [clean];
+
+  // Collect files from this directory
+  for (const file of index.files) {
+    filePaths.push(joinVirtualPath(clean, file.name));
+  }
+
+  // Recurse into subdirectories
+  const subGroups = await mapWithConcurrency(index.folders, 8, async folder => {
+    const child = joinVirtualPath(clean, folder);
+    const result = await collectVirtualPathPaths(env, child);
+    return result;
+  });
+
+  for (const sub of subGroups) {
+    filePaths.push(...sub.filePaths);
+    folderPaths.push(...sub.folderPaths);
+  }
+
+  return { filePaths, folderPaths };
+}
+
+// Fire-and-forget storage cleanup: runs after response, best-effort
+function scheduleStorageCleanup(env, R2, entries) {
+  if (!entries || !entries.length) return;
+  // Clone the data we need so the caller can move on
+  const tasks = entries.filter(e => e?.storageKey).map(e => ({ storageKey: e.storageKey, path: e.path }));
+  if (!tasks.length) return;
+  // Run asynchronously; don't block the delete response
+  (async () => {
+    try {
+      const storageKeys = [...new Set(tasks.map(t => t.storageKey))];
+      const referenced = await findReferencedStorageKeysD1(env, storageKeys);
+      const toClean = tasks.filter(t => !referenced.has(t.storageKey));
+      for (const entry of toClean) {
+        try { await cleanupStorageEntry(env, R2, entry); } catch (e) { /* ignore */ }
+      }
+    } catch (e) { /* best-effort cleanup */ }
+  })();
+}
+
+async function batchDeleteKvKeys(env, keys) {
+  const kv = requireFsKv(env);
+  const unique = [...new Set(keys.filter(Boolean))];
+  if (!unique.length) return;
+  if (typeof kv.batchDelete === 'function') {
+    await kv.batchDelete(unique);
   } else {
-    for (const file of source.files) {
-      await requireFsKv(env).delete(fileEntryKey(file.path));
-      await removeFileFromDirectoryIndex(env, file.path);
-    }
-    for (const folder of source.folders.sort((a, b) => b.length - a.length)) {
-      await requireFsKv(env).delete(folderEntryKey(folder));
-      await removeFolderFromDirectoryIndex(env, folder);
-      await deleteDirectoryIndex(env, folder);
+    // Fallback for plain KV namespace
+    await mapWithConcurrency(unique, 16, key => kv.delete(key));
+  }
+}
+
+async function batchGetKvJson(env, keys) {
+  const kv = requireFsKv(env);
+  const unique = [...new Set(keys.filter(Boolean))];
+  if (!unique.length) return new Map();
+  if (typeof kv.batchGetJson === 'function') {
+    return kv.batchGetJson(unique);
+  }
+  // Fallback for plain KV namespace: read individually
+  const result = new Map();
+  await mapWithConcurrency(unique, 16, async key => {
+    const val = await kvGetJson(env, key);
+    if (val !== null) result.set(key, val);
+  });
+  return result;
+}
+
+async function deleteVirtualPath(env, R2, path) {
+  const clean = assertVirtualPath(path);
+  if (!clean) return { deleted: 0 };
+
+  // Fast path: check if it's a single file
+  const fileEntry = await getFileEntry(env, clean);
+  if (fileEntry) {
+    await requireFsKv(env).delete(fileEntryKey(clean));
+    await removeFileFromDirectoryIndex(env, clean);
+    scheduleStorageCleanup(env, R2, [fileEntry]);
+    return { deleted: 1 };
+  }
+
+  // Check if it's a folder
+  const folderEntry = await getFolderEntry(env, clean);
+  if (!folderEntry && clean) {
+    // Doesn't exist
+    return { deleted: 0 };
+  }
+
+  // Folder: use lightweight path collection to avoid N+1 KV reads
+  const { filePaths, folderPaths } = await collectVirtualPathPaths(env, clean);
+
+  if (!filePaths.length && folderPaths.length <= 1) {
+    // Empty folder: just delete the folder entry and directory index
+    await batchDeleteKvKeys(env, [folderEntryKey(clean), directoryIndexKey(clean)]);
+    await removeFolderFromDirectoryIndex(env, clean);
+    return { deleted: 1 };
+  }
+
+  // 1. Batch-read all file entries to collect storage keys (before deletion)
+  const fileEntryKeys = filePaths.map(p => fileEntryKey(p));
+  const fileEntryMap = await batchGetKvJson(env, fileEntryKeys);
+
+  const storageEntries = [];
+  for (const [key, entry] of fileEntryMap) {
+    if (entry?.storageKey) {
+      const filePath = key.startsWith(FS_FILE_PREFIX) ? key.slice(FS_FILE_PREFIX.length) : '';
+      storageEntries.push({ storageKey: entry.storageKey, path: filePath, ...entry });
     }
   }
 
-  const uniqueByStorage = new Map();
-  for (const entry of deletedEntries) {
-    if (entry.storageKey && !uniqueByStorage.has(entry.storageKey)) uniqueByStorage.set(entry.storageKey, entry);
-  }
-  for (const entry of uniqueByStorage.values()) await cleanupUnreferencedStorage(env, R2, entry);
+  // 2. Update parent directory indexes
+  const sortedFolders = folderPaths.sort((a, b) => b.length - a.length);
+  await removeDeletedItemsFromParentIndexes(env, filePaths, sortedFolders);
 
-  return { deleted: deletedEntries.length };
+  // 3. Batch-delete all metadata (file entries + folder entries + directory indexes)
+  const allKeys = [
+    ...fileEntryKeys,
+    ...sortedFolders.flatMap(f => [folderEntryKey(f), directoryIndexKey(f)])
+  ];
+  await batchDeleteKvKeys(env, allKeys);
+
+  // 4. Storage cleanup: fire-and-forget
+  scheduleStorageCleanup(env, R2, storageEntries);
+
+  return { deleted: filePaths.length + sortedFolders.length };
+}
+
+async function deleteMultipleVirtualPaths(env, R2, paths) {
+  const cleanPaths = [...new Set(paths.map(p => normalizeVirtualPath(p)).filter(Boolean))];
+  if (!cleanPaths.length) return { deleted: 0, cleanupFailed: 0 };
+
+  // Separate files and folders, collecting paths using lightweight index traversal
+  const allFilePaths = [];
+  const allFolderPaths = [];
+  const allStorageEntries = [];
+
+  for (const p of cleanPaths) {
+    // Fast check: is it a file?
+    const fileEntry = await getFileEntry(env, p);
+    if (fileEntry) {
+      allFilePaths.push(p);
+      if (fileEntry.storageKey) allStorageEntries.push({ storageKey: fileEntry.storageKey, path: p, ...fileEntry });
+      continue;
+    }
+
+    // Is it a folder?
+    const folderEntry = await getFolderEntry(env, p);
+    if (!folderEntry) continue; // Doesn't exist, skip
+
+    // Collect paths from folder (lightweight, index-only)
+    const { filePaths, folderPaths } = await collectVirtualPathPaths(env, p);
+    allFilePaths.push(...filePaths);
+    allFolderPaths.push(...folderPaths);
+  }
+
+  if (!allFilePaths.length && !allFolderPaths.length) return { deleted: 0, cleanupFailed: 0 };
+
+  const uniqueFiles = [...new Set(allFilePaths)];
+  const uniqueFolders = [...new Set(allFolderPaths)].sort((a, b) => b.length - a.length);
+
+  // 1. Batch-read all file entries to collect storage keys (before deletion)
+  if (uniqueFiles.length) {
+    const fileEntryKeys = uniqueFiles.map(p => fileEntryKey(p));
+    const fileEntryMap = await batchGetKvJson(env, fileEntryKeys);
+    for (const [key, entry] of fileEntryMap) {
+      if (entry?.storageKey) {
+        const filePath = key.startsWith(FS_FILE_PREFIX) ? key.slice(FS_FILE_PREFIX.length) : '';
+        // Avoid duplicates
+        if (!allStorageEntries.some(e => e.storageKey === entry.storageKey)) {
+          allStorageEntries.push({ storageKey: entry.storageKey, path: filePath, ...entry });
+        }
+      }
+    }
+  }
+
+  // 2. Update parent directory indexes
+  if (uniqueFiles.length || uniqueFolders.length) {
+    await removeDeletedItemsFromParentIndexes(env, uniqueFiles, uniqueFolders);
+  }
+
+  // 3. Batch-delete all metadata
+  const allKeys = [
+    ...uniqueFiles.map(p => fileEntryKey(p)),
+    ...uniqueFolders.flatMap(f => [folderEntryKey(f), directoryIndexKey(f)])
+  ];
+  await batchDeleteKvKeys(env, allKeys);
+
+  // 4. Storage cleanup: fire-and-forget
+  scheduleStorageCleanup(env, R2, allStorageEntries);
+
+  return {
+    deleted: uniqueFiles.length + uniqueFolders.length,
+    cleanupFailed: 0
+  };
 }
 
 function storageNodeUsageKey(nodeId) {
@@ -3178,33 +3794,77 @@ async function getStorageNodeUsages(env, nodes) {
   const usages = await Promise.all(nodes.map(async (node, index) => {
     try {
       if (node.id === MAIN_STORAGE_NODE_ID || node.storageType === 'r2') {
-        const used = Math.max(await calculateR2Usage(env.R2_BUCKET), await getStoredNodeUsage(env, MAIN_STORAGE_NODE_ID).catch(() => 0));
+        // 主节点始终可达
+        const estimatedUsed = await getStoredNodeUsage(env, MAIN_STORAGE_NODE_ID).catch(() => 0);
+        let r2Used = 0;
+        try {
+          r2Used = await calculateR2Usage(env.R2_BUCKET);
+        } catch {
+          // R2 遍历失败时使用估算值
+        }
+        const used = Math.max(r2Used, estimatedUsed);
         return {
           node: { ...node, id: MAIN_STORAGE_NODE_ID, name: node.name || '主控账号', storageType: 'r2' },
           index,
           used,
           total: STORAGE_TOTAL_BYTES,
-          assigned: 0
+          assigned: 0,
+          reachable: true
         };
       }
-      const res = await fetch(node.url + '/api/node/storage?key=storage', {
-        headers: getNodeAuthHeaders(node)
-      });
-      if (!res.ok) throw new Error('storage unavailable');
-      const data = await res.json();
+
+      let nodeUsed = 0;
+      let nodeTotal = STORAGE_TOTAL_BYTES;
+      let reachable = false;
+      try {
+        // 先 ping 测试连通性和认证
+        const pingRes = await fetch(node.url + '/api/node/ping?key=ping', {
+          headers: getNodeAuthHeaders(node)
+        });
+        if (pingRes.ok) {
+          // ping 通过后再获取存储用量
+          try {
+            const storageRes = await fetch(node.url + '/api/node/storage?key=storage', {
+              headers: getNodeAuthHeaders(node)
+            });
+            if (storageRes.ok) {
+              const data = await storageRes.json();
+              nodeUsed = Math.max(0, Number(data.used || 0));
+              nodeTotal = Math.max(1, Number(data.total || STORAGE_TOTAL_BYTES));
+            }
+          } catch {
+            // storage 接口失败但 ping 通过了，节点仍标记为可达
+          }
+          reachable = true;
+        }
+      } catch {
+        // 节点完全不可达
+      }
+
+      // 用 KV 中记录的估算用量与实时查询取最大值
+      const estimatedUsed = await getStoredNodeUsage(env, node.id).catch(() => 0);
+      const used = reachable ? Math.max(nodeUsed, estimatedUsed) : estimatedUsed;
+      return {
+        node,
+        index,
+        used,
+        total: nodeTotal,
+        assigned: 0,
+        reachable
+      };
+    } catch {
       const estimatedUsed = await getStoredNodeUsage(env, node.id).catch(() => 0);
       return {
         node,
         index,
-        used: Math.max(0, Number(data.used || 0), estimatedUsed),
-        total: Math.max(1, Number(data.total || STORAGE_TOTAL_BYTES)),
-        assigned: 0
+        used: estimatedUsed,
+        total: STORAGE_TOTAL_BYTES,
+        assigned: 0,
+        reachable: false
       };
-    } catch {
-      return null;
     }
   }));
-  return usages.filter(Boolean);
+  return usages;
 }
 
 function nearlyEqualNumber(a, b) {
@@ -3230,11 +3890,45 @@ async function allocateDistributedParts(env, nodes, partSizes) {
   const usages = await getStorageNodeUsages(env, nodes);
   if (!usages.length) throw new Error('no available storage nodes');
 
-  return partSizes.map(size => {
-    const usage = chooseBalancedNode(usages);
-    usage.assigned += size;
-    return usage.node;
+  // 过滤：只使用可达的节点（主节点始终可达，外部节点需通过 ping 验证）
+  const reachable = usages.filter(u => u.reachable !== false);
+  // 如果所有外部节点都不可达，至少保留主节点
+  const candidates = reachable.length > 0 ? reachable : usages.filter(u => u.node.id === MAIN_STORAGE_NODE_ID || u.node.storageType === 'r2');
+  if (!candidates.length) throw new Error('no available storage nodes');
+
+  // 按使用率从低到高排序
+  const sorted = [...candidates].sort((a, b) => {
+    const aRatio = (a.used + a.assigned) / a.total;
+    const bRatio = (b.used + b.assigned) / b.total;
+    if (!nearlyEqualNumber(aRatio, bRatio)) return aRatio - bRatio;
+    const aBytes = a.used + a.assigned;
+    const bBytes = b.used + b.assigned;
+    if (aBytes !== bBytes) return aBytes - bBytes;
+    return a.index - b.index;
   });
+
+  // 计算每个节点的剩余容量，用于加权轮询分配
+  const capacities = sorted.map(u => Math.max(1, u.total - u.used - u.assigned));
+  const totalCapacity = capacities.reduce((s, c) => s + c, 0);
+
+  const result = [];
+  for (let i = 0; i < partSizes.length; i++) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let j = 0; j < sorted.length; j++) {
+      const remaining = Math.max(1, sorted[j].total - sorted[j].used - sorted[j].assigned);
+      const assignedCount = result.filter(r => r === sorted[j].node).length;
+      const score = (remaining / totalCapacity) / (assignedCount + 1);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = j;
+      }
+    }
+    sorted[bestIdx].assigned += partSizes[i];
+    result.push(sorted[bestIdx].node);
+  }
+
+  return result;
 }
 
 function getNodeAuthHeaders(node, extra = {}) {
@@ -3584,15 +4278,23 @@ async function streamManifestFile(manifest, env, R2, byteRange = null) {
 async function deleteManifestParts(manifest, env, preservedPartIds = new Set(), options = {}) {
   if (!isManifestFile(manifest)) return;
   const parts = await resolveManifestParts(manifest, env);
-  await Promise.allSettled(parts.filter(part => (
+  await mapWithConcurrency(parts.filter(part => (
     (part.storageType === 'r2' || part.nodeId === MAIN_STORAGE_NODE_ID) && !preservedPartIds.has(manifestPartId(part))
-  )).map(part => env.R2_BUCKET.delete(part.key)));
-  await Promise.allSettled(parts.filter(part => (
+  )), 16, part => env.R2_BUCKET.delete(part.key).catch(err => {
+    console.error('delete R2 manifest part failed:', part.key, err?.message || err);
+  }));
+  await mapWithConcurrency(parts.filter(part => (
     part.storageType !== 'r2' && part.nodeId !== MAIN_STORAGE_NODE_ID && part.nodeUrl && part.token && !preservedPartIds.has(manifestPartId(part))
-  )).map(part => fetch(
-    part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key),
-    { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + part.token } }
-  )));
+  )), 8, async part => {
+    const res = await fetch(
+      part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key=' + encodeURIComponent(part.key),
+      { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + part.token } }
+    ).catch(err => ({ ok: false, status: 502, text: async () => err?.message || 'node delete failed' }));
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      console.error('delete node manifest part failed:', part.nodeId, part.key, res.status, detail.slice(0, 120));
+    }
+  });
   if (options.adjustUsage !== false) {
     await adjustStoredNodeUsages(env, manifestNodeUsageDeltas(parts, -1, preservedPartIds));
   }
@@ -3827,37 +4529,53 @@ export default {
     // ── API Routes ──
 
     if (path === '/api/storage-nodes' && request.method === 'GET') {
-      const nodes = await getStorageNodes(env, true);
-      return jsonResponse({ nodes: nodes.map(publicNode) });
+      try {
+        const nodes = await getStorageNodes(env, true);
+        const safeNodes = Array.isArray(nodes) ? nodes : [];
+        return jsonResponse({ nodes: safeNodes.map(n => publicNode(n || {})) });
+      } catch (err) {
+        console.error('getStorageNodes failed:', err?.message || err);
+        return jsonResponse({ nodes: [], error: 'storage nodes unavailable' });
+      }
     }
 
     if (path === '/api/storage-nodes' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const nodes = await getStorageNodes(env, true);
-      const existing = body.id ? nodes.find(item => item.id === body.id) : null;
-      const node = sanitizeNode({
-        id: body.id || crypto.randomUUID(),
-        name: body.name,
-        url: body.url,
-        token: body.token,
-        enabled: body.enabled !== false,
-        weight: body.weight,
-        createdAt: existing?.createdAt || new Date().toISOString()
-      });
-      if (!node.name || !node.url || !node.token) return jsonResponse({ ok: false, error: 'missing fields' }, 400);
-      const index = nodes.findIndex(item => item.id === node.id);
-      if (index >= 0) nodes[index] = node;
-      else nodes.push(node);
-      await saveStorageNodes(env, nodes);
-      return jsonResponse({ ok: true, node: publicNode(node) });
+      try {
+        const body = await request.json().catch(() => ({}));
+        const nodes = await getStorageNodes(env, true);
+        const existing = body.id ? nodes.find(item => item.id === body.id) : null;
+        const node = sanitizeNode({
+          id: body.id || crypto.randomUUID(),
+          name: body.name,
+          url: body.url,
+          token: body.token,
+          enabled: body.enabled !== false,
+          weight: body.weight,
+          createdAt: existing?.createdAt || new Date().toISOString()
+        });
+        if (!node.name || !node.url || !node.token) return jsonResponse({ ok: false, error: 'missing fields' }, 400);
+        const index = nodes.findIndex(item => item.id === node.id);
+        if (index >= 0) nodes[index] = node;
+        else nodes.push(node);
+        await saveStorageNodes(env, nodes);
+        return jsonResponse({ ok: true, node: publicNode(node) });
+      } catch (err) {
+        console.error('saveStorageNode failed:', err?.message || err);
+        return jsonResponse({ ok: false, error: 'save failed: ' + (err?.message || 'unknown error') }, 500);
+      }
     }
 
     if (path === '/api/storage-nodes' && request.method === 'DELETE') {
-      const id = url.searchParams.get('id');
-      if (!id) return jsonResponse({ ok: false, error: 'missing id' }, 400);
-      const nodes = await getStorageNodes(env, true);
-      await saveStorageNodes(env, nodes.filter(node => node.id !== id));
-      return jsonResponse({ ok: true });
+      try {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ ok: false, error: 'missing id' }, 400);
+        const nodes = await getStorageNodes(env, true);
+        await saveStorageNodes(env, nodes.filter(node => node.id !== id));
+        return jsonResponse({ ok: true });
+      } catch (err) {
+        console.error('deleteStorageNode failed:', err?.message || err);
+        return jsonResponse({ ok: false, error: 'delete failed: ' + (err?.message || 'unknown error') }, 500);
+      }
     }
 
     if (path === '/api/storage-nodes/test' && request.method === 'POST') {
@@ -4058,6 +4776,51 @@ export default {
       return jsonResponse({ ok: true, key: part.key });
     }
 
+    if (path === '/api/distributed/node-part' && request.method === 'PUT') {
+      const sessionId = url.searchParams.get('sessionId') || '';
+      const token = url.searchParams.get('token') || '';
+      const partNumber = parseInt(url.searchParams.get('partNumber') || '', 10);
+      if (!sessionId || !token || !Number.isInteger(partNumber) || partNumber < 1) {
+        return jsonResponse({ ok: false, error: 'missing fields' }, 400);
+      }
+      const raw = await kvGetRaw(env, MULTIPART_SESSION_PREFIX + sessionId);
+      if (!raw) return jsonResponse({ ok: false, error: 'session expired' }, 404);
+      const session = JSON.parse(raw);
+      const part = (session.parts || []).find(item => item.partNumber === partNumber);
+      if (!part || part.storageType !== 'node' || part.uploadToken !== token) {
+        return jsonResponse({ ok: false, error: 'invalid part token' }, 401);
+      }
+      if (!part.nodeUrl || !part.token || !part.key) {
+        return jsonResponse({ ok: false, error: 'invalid node part config' }, 500);
+      }
+
+      const expectedSize = Math.max(0, Number(part.size || 0));
+      const contentLength = Number(request.headers.get('Content-Length') || 0);
+      if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
+        return jsonResponse({ ok: false, error: 'part size mismatch' }, 400);
+      }
+
+      const nodeUrl = part.nodeUrl.replace(/\/+$/, '') + '/api/node/part?key='
+        + encodeURIComponent(part.key) + '&size=' + expectedSize;
+      const nodeRes = await fetch(nodeUrl, {
+        method: 'PUT',
+        headers: getNodeAuthHeaders({ token: part.token }),
+        body: request.body
+      }).catch(err => ({ ok: false, status: 502, text: async () => err?.message || 'node fetch failed' }));
+
+      if (!nodeRes.ok) {
+        const text = await nodeRes.text().catch(() => '');
+        return jsonResponse({
+          ok: false,
+          error: 'node upload failed',
+          nodeId: part.nodeId,
+          status: nodeRes.status || 502,
+          detail: text.slice(0, 200)
+        }, 502);
+      }
+      return jsonResponse({ ok: true, key: part.key, nodeId: part.nodeId });
+    }
+
     if (path === '/api/distributed/init' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const filePath = String(body.path || '').trim();
@@ -4088,7 +4851,7 @@ export default {
         const partKey = NODE_PART_PREFIX + sessionId + '_' + String(partNumber).padStart(6, '0');
         const partSize = partSizes[partNumber - 1];
         const isMain = node.id === MAIN_STORAGE_NODE_ID || node.storageType === 'r2';
-        const uploadToken = isMain ? crypto.randomUUID().replace(/-/g, '') : '';
+        const uploadToken = crypto.randomUUID().replace(/-/g, '');
         parts.push({
           partNumber,
           size: partSize,
@@ -4101,6 +4864,9 @@ export default {
           uploadToken,
           uploadUrl: isMain
             ? '/api/distributed/main-part?sessionId=' + encodeURIComponent(sessionId) + '&partNumber=' + partNumber + '&token=' + encodeURIComponent(uploadToken)
+            : '/api/distributed/node-part?sessionId=' + encodeURIComponent(sessionId) + '&partNumber=' + partNumber + '&token=' + encodeURIComponent(uploadToken),
+          directUploadUrl: isMain
+            ? ''
             : node.url + '/api/node/part?key=' + encodeURIComponent(partKey) + '&size=' + partSize
         });
       }
@@ -4117,14 +4883,27 @@ export default {
         parts
       };
       await kvPutRaw(env, MULTIPART_SESSION_PREFIX + sessionId, JSON.stringify(session), { expirationTtl: 86400 });
+
+      // 统计分片分布情况
+      const nodeSummary = new Map();
+      for (const part of parts) {
+        const label = part.nodeName || part.nodeId;
+        const entry = nodeSummary.get(label) || { nodeName: label, nodeId: part.nodeId, parts: 0, bytes: 0 };
+        entry.parts++;
+        entry.bytes += part.size;
+        nodeSummary.set(label, entry);
+      }
+
       return jsonResponse({
         ok: true,
         sessionId,
+        distribution: [...nodeSummary.values()],
         parts: parts.map(part => ({
           partNumber: part.partNumber,
           size: part.size,
           uploadUrl: part.uploadUrl,
-          token: part.token || ''
+          directUploadUrl: part.directUploadUrl || '',
+          token: ''
         }))
       });
     }
@@ -4239,6 +5018,15 @@ export default {
       if (!filePath) return new Response('Missing path', { status: 400 });
       await deleteVirtualPath(env, R2, filePath);
       return Response.json({ ok: true });
+    }
+
+    // Batch delete
+    if (path === '/api/delete-batch' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const paths = Array.isArray(body.paths) ? body.paths.filter(Boolean) : [];
+      if (!paths.length) return new Response('Missing paths', { status: 400 });
+      const result = await deleteMultipleVirtualPaths(env, R2, paths);
+      return Response.json({ ok: true, ...result });
     }
 
     // Rename (copy + delete)
