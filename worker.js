@@ -872,7 +872,7 @@ function renderHTML(content, title = 'R2 云盘') {
 ${content}
 
 <footer class="foot-bar">
-  <span>v1.1.3</span>
+  <span>v1.1.4</span>
   <span class="foot-bar-sep">|</span>
   <a href="https://github.com/HandsomeMJZ" target="_blank" rel="noopener noreferrer">Github@HandsomeMJZ</a>
   <span class="foot-bar-sep">|</span>
