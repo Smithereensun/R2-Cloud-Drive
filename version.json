@@ -1,6 +1,6 @@
 {
   "version": "1.1.5",
-  "versionCode": 116,
+  "versionCode": 115,
   "releaseDate": "2026-05-29",
   "releaseNotes": "修复 ctx 缺失导致的 R2 空间不释放问题；新增孤儿文件清扫功能；错误日志替代静默吞没",
   "downloadUrl": "https://github.com/HandsomeMJZ/R2-Cloud-Drive"
