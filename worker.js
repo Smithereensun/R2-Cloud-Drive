@@ -849,6 +849,26 @@ function renderHTML(content, title = 'R2 云盘') {
     .node-form-grid { grid-template-columns: 1fr; }
   }
 
+  /* ── Orphan Cleanup ── */
+  .orphan-list { display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 12px; }
+  .orphan-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: var(--radius-s);
+    cursor: pointer; transition: background .1s;
+    border: 1px solid transparent;
+  }
+  .orphan-row:hover { background: rgba(60,64,67,.06); }
+  .orphan-row:has(input:checked) { background: var(--primary-light); border-color: var(--primary); }
+  .orphan-check { width: 18px; height: 18px; flex-shrink: 0; cursor: pointer; accent-color: var(--primary); }
+  .orphan-key {
+    flex: 1; min-width: 0; font-size: 13px; font-family: 'Consolas','Monaco',monospace;
+    color: var(--on-surface); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .orphan-size { font-size: 12px; color: var(--on-surface-variant); white-space: nowrap; flex-shrink: 0; }
+  .orphan-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 4px; font-size: 13px; color: var(--on-surface-variant); cursor: pointer; }
+  .orphan-stats { font-size: 12px; color: var(--on-surface-variant); padding: 0 12px; margin-bottom: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
     /* ── Dark Mode Toggle ── */
   /* Icon is handled by JS toggleDarkMode() */
 
@@ -1596,7 +1616,10 @@ function renderStorageDetails(nodes) {
   }).join('');
 }
 function deleteSelected() {
-  if (!selectedFiles.size) return;
+  if (!selectedFiles.size) {
+    openOrphanCleanup();
+    return;
+  }
   if (!confirm('确定删除选中的 ' + selectedFiles.size + ' 个文件？')) return;
   const paths = [...selectedFiles].map(name => currentPath ? currentPath + '/' + name : name);
   fetch('/api/delete-batch', {
@@ -1604,6 +1627,143 @@ function deleteSelected() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths })
   }).then(r => r.ok ? (showSnackbar('已删除 ' + selectedFiles.size + ' 个文件'), location.reload()) : showSnackbar('删除失败'));
+}
+
+// ── Orphan File Cleanup ──
+let orphanScanResults = [];
+
+function openOrphanCleanup() {
+  document.getElementById('orphanModal')?.classList.add('open');
+  const list = document.getElementById('orphanList');
+  const btn = document.getElementById('orphanScanBtn');
+  if (list) list.innerHTML = '<div style="padding:16px;color:var(--on-surface-variant);text-align:center">点击"扫描"按钮查找未被引用的 R2 对象</div>';
+  if (btn) { btn.disabled = false; btn.textContent = '开始扫描'; }
+  orphanScanResults = [];
+  updateOrphanSelectAll();
+}
+function closeOrphanCleanup() {
+  document.getElementById('orphanModal')?.classList.remove('open');
+}
+async function scanOrphans() {
+  const list = document.getElementById('orphanList');
+  const btn = document.getElementById('orphanScanBtn');
+  const stats = document.getElementById('orphanStats');
+  if (list) list.innerHTML = '<div style="padding:16px;color:var(--on-surface-variant);text-align:center"><span class="material-icons-round" style="animation:spin 1s linear infinite;display:block;margin:0 auto 8px">sync</span>正在扫描 R2 对象...</div>';
+  if (btn) { btn.disabled = true; btn.textContent = '扫描中...'; }
+  if (stats) stats.textContent = '';
+
+  try {
+    const res = await fetch('/api/orphan-cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'scan' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'scan failed');
+
+    orphanScanResults = data.orphans || [];
+    if (stats) {
+      const totalSize = formatSize(data.totalSize || 0);
+      stats.textContent = '共扫描 ' + (data.totalObjects || 0) + ' 个对象，发现 ' + orphanScanResults.length + ' 个孤儿文件 (' + totalSize + ')';
+    }
+
+    if (!orphanScanResults.length) {
+      if (list) list.innerHTML = '<div style="padding:24px;color:var(--success);text-align:center"><span class="material-icons-round" style="font-size:48px;display:block;margin:0 auto 8px">check_circle</span>未发现孤儿文件，所有 R2 对象均被引用</div>';
+    } else {
+      if (list) {
+        list.innerHTML = orphanScanResults.map((o, i) =>
+          '<label class="orphan-row" data-index="' + i + '">' +
+          '<input type="checkbox" class="orphan-check" onchange="updateOrphanSelectAll()" data-index="' + i + '">' +
+          '<span class="orphan-key" title="' + escapeHtml(o.key) + '">' + escapeHtml(o.key) + '</span>' +
+          '<span class="orphan-size">' + formatSize(o.size) + '</span>' +
+          '</label>'
+        ).join('');
+      }
+    }
+    updateOrphanSelectAll();
+  } catch (err) {
+    if (list) list.innerHTML = '<div style="padding:16px;color:var(--error);text-align:center">扫描失败：' + escapeHtml(err.message || '未知错误') + '</div>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新扫描'; }
+  }
+}
+
+function updateOrphanSelectAll() {
+  const checkAll = document.getElementById('orphanCheckAll');
+  const checks = document.querySelectorAll('.orphan-check');
+  const delBtn = document.getElementById('orphanDeleteBtn');
+  const label = document.getElementById('orphanSelectAllLabel');
+  if (checkAll) checkAll.checked = checks.length > 0 && [...checks].every(c => c.checked);
+  if (delBtn) delBtn.disabled = ![...checks].some(c => c.checked);
+  if (label) label.style.display = checks.length > 0 ? '' : 'none';
+}
+
+function toggleOrphanSelectAll() {
+  const checkAll = document.getElementById('orphanCheckAll');
+  const checks = document.querySelectorAll('.orphan-check');
+  const checked = checkAll?.checked || false;
+  checks.forEach(c => { c.checked = checked; });
+  updateOrphanSelectAll();
+}
+
+async function deleteSelectedOrphans() {
+  const checks = document.querySelectorAll('.orphan-check:checked');
+  if (!checks.length) return;
+  const keys = [...checks].map(c => orphanScanResults[parseInt(c.dataset.index)]?.key).filter(Boolean);
+  if (!keys.length) return;
+  if (!confirm('确定删除选中的 ' + keys.length + ' 个孤儿文件？此操作不可撤销。')) return;
+
+  const delBtn = document.getElementById('orphanDeleteBtn');
+  const list = document.getElementById('orphanList');
+  if (delBtn) { delBtn.disabled = true; delBtn.textContent = '删除中...'; }
+
+  try {
+    const res = await fetch('/api/orphan-cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clean', keys })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'delete failed');
+
+    showSnackbar('已删除 ' + (data.deleted || 0) + ' 个孤儿文件，释放 ' + formatSize(data.freedBytes || 0) +
+      (data.failed ? '，失败 ' + data.failed + ' 个' : ''));
+
+    // Remove deleted items from the list
+    const deletedKeys = new Set(keys);
+    orphanScanResults = orphanScanResults.filter(o => !deletedKeys.has(o.key));
+    if (list) {
+      const rows = list.querySelectorAll('.orphan-row');
+      rows.forEach(row => {
+        const idx = parseInt(row.dataset.index);
+        if (idx >= 0 && idx < orphanScanResults.length && deletedKeys.has(orphanScanResults[idx]?.key)) {
+          // Actually, after filtering, indices change. Let's just re-render.
+        }
+      });
+      // Re-render remaining
+      if (!orphanScanResults.length) {
+        list.innerHTML = '<div style="padding:24px;color:var(--success);text-align:center"><span class="material-icons-round" style="font-size:48px;display:block;margin:0 auto 8px">check_circle</span>所有孤儿文件已清除</div>';
+      } else {
+        list.innerHTML = orphanScanResults.map((o, i) =>
+          '<label class="orphan-row" data-index="' + i + '">' +
+          '<input type="checkbox" class="orphan-check" onchange="updateOrphanSelectAll()" data-index="' + i + '">' +
+          '<span class="orphan-key" title="' + escapeHtml(o.key) + '">' + escapeHtml(o.key) + '</span>' +
+          '<span class="orphan-size">' + formatSize(o.size) + '</span>' +
+          '</label>'
+        ).join('');
+      }
+      const stats = document.getElementById('orphanStats');
+      if (stats) {
+        const remainingSize = orphanScanResults.reduce((s, o) => s + o.size, 0);
+        stats.textContent = '剩余 ' + orphanScanResults.length + ' 个孤儿文件 (' + formatSize(remainingSize) + ')';
+      }
+    }
+    updateOrphanSelectAll();
+  } catch (err) {
+    showSnackbar('删除失败：' + (err.message || '未知错误'));
+  } finally {
+    if (delBtn) { delBtn.disabled = false; delBtn.textContent = '删除选中'; }
+  }
 }
 
 // ── Context Menu ──
@@ -2710,7 +2870,38 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     </div>
   </div>
 </div>
-`, siteTitle);
+
+<!-- Orphan File Cleanup Modal -->
+<div class="modal-overlay" id="orphanModal" onclick="if(event.target===this)closeOrphanCleanup()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="material-icons-round" style="color:var(--warning)">cleaning_services</span>
+      <span class="modal-title">清扫孤儿文件</span>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--on-surface-variant);margin-bottom:12px">
+        扫描 R2 存储桶中未被任何文件映射引用的"孤儿"对象。这些对象通常由删除操作异常中断产生，占用存储空间但不可访问。
+      </p>
+      <div class="orphan-stats" id="orphanStats"></div>
+      <label class="orphan-select-all" id="orphanSelectAllLabel" style="display:none">
+        <input type="checkbox" id="orphanCheckAll" onchange="toggleOrphanSelectAll()">
+        <span>全选 / 取消全选</span>
+      </label>
+      <div class="orphan-list" id="orphanList">
+        <div style="padding:16px;color:var(--on-surface-variant);text-align:center">点击"扫描"按钮查找未被引用的 R2 对象</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outlined" onclick="closeOrphanCleanup()">关闭</button>
+      <button class="btn-outlined" id="orphanScanBtn" onclick="scanOrphans()" style="color:var(--warning);border-color:var(--warning)">
+        <span class="material-icons-round">search</span> 开始扫描
+      </button>
+      <button class="fab" style="box-shadow:none;background:var(--error)" id="orphanDeleteBtn" onclick="deleteSelectedOrphans()" disabled>
+        <span class="material-icons-round">delete_forever</span> 删除选中
+      </button>
+    </div>
+  </div>
+</div>`, siteTitle);
 }
 
 // ── Session (Cookie-based) ──
@@ -3629,23 +3820,36 @@ async function collectVirtualPathPaths(env, folderPath) {
   return { filePaths, folderPaths };
 }
 
-// Fire-and-forget storage cleanup: runs after response, best-effort
-function scheduleStorageCleanup(env, R2, entries) {
+// Deferred storage cleanup: uses ctx.waitUntil() to keep the worker alive
+// until all R2 object deletions complete. Falls back to fire-and-forget
+// if ctx is not available (but cleanup may be unreliable in that case).
+function scheduleStorageCleanup(env, R2, entries, ctx) {
   if (!entries || !entries.length) return;
   // Clone the data we need so the caller can move on
   const tasks = entries.filter(e => e?.storageKey).map(e => ({ storageKey: e.storageKey, path: e.path }));
   if (!tasks.length) return;
-  // Run asynchronously; don't block the delete response
-  (async () => {
+  if (!ctx) {
+    console.warn('[scheduleStorageCleanup] called without ctx — cleanup may be killed before completion');
+  }
+  const cleanupPromise = (async () => {
     try {
       const storageKeys = [...new Set(tasks.map(t => t.storageKey))];
       const referenced = await findReferencedStorageKeysD1(env, storageKeys);
       const toClean = tasks.filter(t => !referenced.has(t.storageKey));
       for (const entry of toClean) {
-        try { await cleanupStorageEntry(env, R2, entry); } catch (e) { /* ignore */ }
+        try {
+          await cleanupStorageEntry(env, R2, entry);
+        } catch (e) {
+          console.error('[scheduleStorageCleanup] cleanupStorageEntry failed for', entry?.storageKey, ':', e?.message || e);
+        }
       }
-    } catch (e) { /* best-effort cleanup */ }
+    } catch (e) {
+      console.error('[scheduleStorageCleanup] batch cleanup failed:', e?.message || e);
+    }
   })();
+  if (ctx) {
+    ctx.waitUntil(cleanupPromise);
+  }
 }
 
 async function batchDeleteKvKeys(env, keys) {
@@ -3676,7 +3880,7 @@ async function batchGetKvJson(env, keys) {
   return result;
 }
 
-async function deleteVirtualPath(env, R2, path) {
+async function deleteVirtualPath(env, R2, path, ctx) {
   const clean = assertVirtualPath(path);
   if (!clean) return { deleted: 0 };
 
@@ -3685,7 +3889,7 @@ async function deleteVirtualPath(env, R2, path) {
   if (fileEntry) {
     await requireFsKv(env).delete(fileEntryKey(clean));
     await removeFileFromDirectoryIndex(env, clean);
-    scheduleStorageCleanup(env, R2, [fileEntry]);
+    scheduleStorageCleanup(env, R2, [fileEntry], ctx);
     return { deleted: 1 };
   }
 
@@ -3729,13 +3933,13 @@ async function deleteVirtualPath(env, R2, path) {
   ];
   await batchDeleteKvKeys(env, allKeys);
 
-  // 4. Storage cleanup: fire-and-forget
-  scheduleStorageCleanup(env, R2, storageEntries);
+  // 4. Storage cleanup: deferred via ctx.waitUntil()
+  scheduleStorageCleanup(env, R2, storageEntries, ctx);
 
   return { deleted: filePaths.length + sortedFolders.length };
 }
 
-async function deleteMultipleVirtualPaths(env, R2, paths) {
+async function deleteMultipleVirtualPaths(env, R2, paths, ctx) {
   const cleanPaths = [...new Set(paths.map(p => normalizeVirtualPath(p)).filter(Boolean))];
   if (!cleanPaths.length) return { deleted: 0, cleanupFailed: 0 };
 
@@ -3795,13 +3999,172 @@ async function deleteMultipleVirtualPaths(env, R2, paths) {
   ];
   await batchDeleteKvKeys(env, allKeys);
 
-  // 4. Storage cleanup: fire-and-forget
-  scheduleStorageCleanup(env, R2, allStorageEntries);
+  // 4. Storage cleanup: deferred via ctx.waitUntil()
+  scheduleStorageCleanup(env, R2, allStorageEntries, ctx);
 
   return {
     deleted: uniqueFiles.length + uniqueFolders.length,
     cleanupFailed: 0
   };
+}
+
+// ── Orphan File Cleanup ──
+// Scans R2 for objects that have no corresponding D1 file entry or manifest part reference.
+
+async function findAllReferencedStorageKeys(env) {
+  const DB = env.DB;
+  const referenced = new Set();
+
+  if (DB) {
+    // D1 path: query all file entries efficiently
+    await ensureD1KvSchema(DB);
+    const now = Math.floor(Date.now() / 1000);
+    const prefix = FS_FILE_PREFIX;
+    const bound = prefixUpperBound(prefix);
+
+    let offset = 0;
+    const PAGE = 200;
+    let safety = 0;
+    while (safety < 500) {
+      const result = await DB.prepare(
+        `SELECT "value" FROM ${D1_KV_TABLE} WHERE "key" >= ? AND "key" < ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY "key" LIMIT ? OFFSET ?`
+      ).bind(prefix, bound, now, PAGE, offset).all();
+      const rows = result.results || [];
+      if (!rows.length) break;
+
+      for (const row of rows) {
+        try {
+          const entry = JSON.parse(row.value);
+          if (entry?.storageKey) {
+            referenced.add(entry.storageKey);
+            // For distributed files, also collect manifest part keys
+            if (entry.storageType === 'distributed') {
+              // We'll collect part keys in a separate pass via R2
+            }
+          }
+        } catch { /* skip malformed JSON */ }
+      }
+
+      if (rows.length < PAGE) break;
+      offset += PAGE;
+      safety++;
+    }
+  } else {
+    // Fallback: use listAllFileEntries
+    const allEntries = await listAllFileEntries(env, '');
+    for (const entry of allEntries) {
+      if (entry?.storageKey) referenced.add(entry.storageKey);
+    }
+  }
+
+  return referenced;
+}
+
+async function collectManifestPartKeys(env, R2, storageKeys, ctx) {
+  const partKeys = new Set();
+  if (!storageKeys.size) return partKeys;
+
+  // For each storageKey, try to read it as a manifest
+  // Only process keys that might be manifests — we check R2 metadata
+  const keys = [...storageKeys];
+  const BATCH = 10;
+
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const chunk = keys.slice(i, i + BATCH);
+    const results = await Promise.all(chunk.map(async (key) => {
+      try {
+        const meta = await R2.head(key);
+        if (!meta || !hasManifestMetadata(meta)) return [];
+        const obj = await R2.get(key);
+        const manifest = await readManifestObject(obj);
+        if (!isManifestFile(manifest)) return [];
+        return (manifest.parts || []).map(p => p.key).filter(Boolean);
+      } catch {
+        return [];
+      }
+    }));
+    for (const keys of results) {
+      for (const k of keys) partKeys.add(k);
+    }
+  }
+
+  return partKeys;
+}
+
+async function findOrphanStorageKeys(env, R2, ctx) {
+  // 1. Collect all R2 object keys with sizes
+  const r2Objects = [];
+  let cursor;
+  let safety = 0;
+  do {
+    const listed = await R2.list({ cursor, limit: 500, include: ['customMetadata'] });
+    for (const obj of listed.objects) {
+      r2Objects.push({ key: obj.key, size: obj.size });
+    }
+    cursor = listed.cursor;
+    safety++;
+    if (safety > 200) break; // safety limit: max ~100k objects
+  } while (cursor);
+
+  if (!r2Objects.length) return { orphans: [], totalSize: 0, totalObjects: 0 };
+
+  // 2. Collect all referenced storage keys from D1 file entries
+  const referenced = await findAllReferencedStorageKeys(env);
+
+  // 3. Collect manifest part keys (keys referenced inside distributed file manifests)
+  const partKeys = await collectManifestPartKeys(env, R2, referenced, ctx);
+  for (const key of partKeys) referenced.add(key);
+
+  // 4. Also reference multipart/r2multipart session keys?
+  // Skip temporary session data for now; session keys have TTL and auto-expire
+
+  // 5. Find orphans: R2 objects not in the referenced set
+  const orphans = r2Objects.filter(obj => !referenced.has(obj.key));
+  const totalSize = orphans.reduce((sum, o) => sum + o.size, 0);
+
+  return {
+    orphans: orphans.map(o => ({ key: o.key, size: o.size })),
+    totalSize,
+    totalObjects: r2Objects.length
+  };
+}
+
+async function deleteOrphanStorageKeys(env, R2, keys, ctx) {
+  if (!keys || !keys.length) return { deleted: 0, failed: 0, freedBytes: 0 };
+
+  const keysToDelete = [...new Set(keys.filter(Boolean))];
+  let deleted = 0;
+  let failed = 0;
+  let freedBytes = 0;
+
+  // Get sizes before deletion (for reporting)
+  const sizes = new Map();
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < keysToDelete.length; i += BATCH_SIZE) {
+    const chunk = keysToDelete.slice(i, i + BATCH_SIZE);
+    const metas = await Promise.all(chunk.map(k => R2.head(k).catch(() => null)));
+    metas.forEach((meta, idx) => {
+      if (meta) sizes.set(chunk[idx], meta.size || 0);
+    });
+  }
+
+  // Delete in manageable batches — always await for accurate API response
+  const DELETE_BATCH = 10;
+  for (let i = 0; i < keysToDelete.length; i += DELETE_BATCH) {
+    const chunk = keysToDelete.slice(i, i + DELETE_BATCH);
+    const results = await Promise.allSettled(chunk.map(k => R2.delete(k)));
+    results.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        deleted++;
+        freedBytes += sizes.get(chunk[idx]) || 0;
+      } else {
+        failed++;
+        console.error('[deleteOrphanStorageKeys] failed to delete', chunk[idx], ':', result.reason?.message || result.reason);
+      }
+    });
+  }
+
+  return { deleted, failed, freedBytes };
 }
 
 function storageNodeUsageKey(nodeId) {
@@ -4456,7 +4819,7 @@ function workerErrorResponse(request, err) {
 
 // ── Main Handler ──
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -5065,7 +5428,7 @@ export default {
     if (path === '/api/delete' && request.method === 'DELETE') {
       const filePath = url.searchParams.get('path');
       if (!filePath) return new Response('Missing path', { status: 400 });
-      await deleteVirtualPath(env, R2, filePath);
+      await deleteVirtualPath(env, R2, filePath, ctx);
       return Response.json({ ok: true });
     }
 
@@ -5074,8 +5437,40 @@ export default {
       const body = await request.json().catch(() => ({}));
       const paths = Array.isArray(body.paths) ? body.paths.filter(Boolean) : [];
       if (!paths.length) return new Response('Missing paths', { status: 400 });
-      const result = await deleteMultipleVirtualPaths(env, R2, paths);
+      const result = await deleteMultipleVirtualPaths(env, R2, paths, ctx);
       return Response.json({ ok: true, ...result });
+    }
+
+    // Orphan file cleanup — scan & clean R2 objects not referenced by D1
+    if (path === '/api/orphan-cleanup' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const action = body.action;
+
+      if (action === 'scan') {
+        const result = await findOrphanStorageKeys(env, R2, ctx);
+        return jsonResponse({
+          ok: true,
+          action: 'scan',
+          orphans: result.orphans,
+          totalSize: result.totalSize,
+          totalObjects: result.totalObjects
+        });
+      }
+
+      if (action === 'clean') {
+        const keys = Array.isArray(body.keys) ? body.keys.filter(Boolean) : [];
+        if (!keys.length) return jsonResponse({ ok: false, error: 'no keys provided' }, 400);
+        const result = await deleteOrphanStorageKeys(env, R2, keys, ctx);
+        return jsonResponse({
+          ok: true,
+          action: 'clean',
+          deleted: result.deleted,
+          failed: result.failed,
+          freedBytes: result.freedBytes
+        });
+      }
+
+      return jsonResponse({ ok: false, error: 'unknown action: ' + (action || 'none') }, 400);
     }
 
     // Rename (copy + delete)
