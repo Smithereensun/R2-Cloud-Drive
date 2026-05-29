@@ -22,7 +22,8 @@
 ├── worker.js          # 主程序：UI、API、R2/D1/分布式存储全部在此
 ├── README.MD          # 使用/部署说明，当前终端查看可能出现编码乱码
 ├── API说明文档.MD     # 项目介绍文件
-└── TECHNICAL_DOC.md   # 本技术交接文档
+├── TECHNICAL_DOC.md   # 本技术交接文档
+└── version.json       # 版本信息文件，用于前端自动检查更新
 ```
 
 当前仓库没有 `wrangler.toml`。部署时需要在 Cloudflare Dashboard 或 Wrangler 中绑定：
@@ -57,7 +58,7 @@ database_id = "your-database-id"
 | --- | --- |
 | `MIME_TYPES`、`getMimeType`、`getFileIcon` 等 | 文件类型、图标、格式化、安全转义工具 |
 | `renderHTML`、`renderLoginPage`、`renderSharedPage`、`renderDrivePage` | 服务端生成完整 HTML 页面 |
-| HTML 内嵌 `<script>` | 前端交互：上传、下载、预览、剪贴板、主题、节点管理 |
+| HTML 内嵌 `<script>` | 前端交互：上传、下载、预览、剪贴板、主题、节点管理、孤儿清扫、版本检查 |
 | 常量区：`SHARED_PREFIX` 起 | 后端核心常量 |
 | D1 KV 封装：`ensureD1KvSchema`、`d1KvStore`、`requireFsKv` | 将 D1 包装成 KV 接口 |
 | 虚拟文件系统：`putFileEntry`、`listDirectory`、`copyVirtualPath`、`moveVirtualPath`、`deleteVirtualPath` | 用 D1 元数据映射 R2 对象 |
@@ -269,6 +270,7 @@ export default {
 | `/api/clipboard/paste` | POST | 服务端复制/移动 |
 | `/api/delete?path=` | DELETE | 删除虚拟文件/目录（单文件/文件夹） |
 | `/api/delete-batch` | POST | 批量删除（body: `{"paths": [...]}`），内部使用批量 D1 操作 |
+| `/api/orphan-cleanup` | POST | 孤儿文件扫描（`action: "scan"`）与清理（`action: "clean"`） |
 | `/api/rename` | POST | 移动/重命名 |
 | `/api/mkdir` | POST | 创建文件夹 |
 
@@ -614,6 +616,58 @@ function isNodeRequestAuthorized(request, env) {
 - `/api/delete`
 - `/api/delete-batch`
 - `/api/rename`
+
+想改孤儿清扫：
+
+- `findOrphanStorageKeys` / `deleteOrphanStorageKeys`
+- `findAllReferencedStorageKeys` / `collectManifestPartKeys`
+- `/api/orphan-cleanup`
+- 前端：`openOrphanCleanup` / `scanOrphans` / `deleteSelectedOrphans`
+
+想改版本检查：
+
+- `version.json`（仓库根目录）
+- 前端：`checkVersionUpdate` / `applyVersionResult`
+- 前端常量：`CURRENT_VERSION` / `CURRENT_VERSION_CODE` / `VERSION_CHECK_URL`
+
+## 13. 版本更新检查
+
+### version.json
+
+仓库根目录的 `version.json` 用于前端自动版本检查：
+
+```json
+{
+  "version": "1.1.5",
+  "versionCode": 115,
+  "releaseDate": "2026-05-29",
+  "releaseNotes": "...",
+  "downloadUrl": "https://github.com/HandsomeMJZ/R2-Cloud-Drive"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `version` | 语义化版本号（展示用） |
+| `versionCode` | 整数版本码（比较用）：major×100 + minor×10 + patch |
+| `releaseDate` | 发布日期 |
+| `releaseNotes` | 更新说明 |
+| `downloadUrl` | 下载/仓库链接 |
+
+### 前端检查逻辑
+
+- 页面加载时自动 fetch GitHub Raw URL：`https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/main/version.json`
+- 比较远程 `versionCode` 与当前 `CURRENT_VERSION_CODE`（常量 115）
+- 检查结果缓存到 `sessionStorage`，6 小时内不重复请求
+- 如果有新版本：页脚版本号旁显示红色「有新版本」角标，悬停弹出 tooltip 显示更新详情
+- 如果已是最新：tooltip 显示绿色「已是最新版本」
+
+### 发布新版本时的操作
+
+1. 更新 `worker.js` 页脚版本号和 `CURRENT_VERSION` / `CURRENT_VERSION_CODE` 常量
+2. 更新 `version.json` 中的版本号、版本码、发布日期和更新说明
+3. 提交并推送到 GitHub main 分支
+4. 所有已部署的 Worker 实例会在用户下次访问时自动检测到更新
 
 ## 14. 最小调用示例
 

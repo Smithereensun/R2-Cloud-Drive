@@ -18,7 +18,8 @@
 - [8. 容量查询 API](#8-容量查询-api)
 - [9. 共享文件夹 API（公开）](#9-共享文件夹-api公开)
 - [10. 存储节点 Worker API（节点模式）](#10-存储节点-worker-api节点模式)
-- [11. 错误码参考](#11-错误码参考)
+- [11. 孤儿文件清扫 API](#11-孤儿文件清扫-api)
+- [12. 错误码参考](#12-错误码参考)
 
 ---
 
@@ -1221,7 +1222,102 @@ Authorization: Bearer your-node-token
 
 ---
 
-## 11. 错误码参考
+## 11. 孤儿文件清扫 API
+
+> 需要登录。扫描 R2 存储桶中未被任何 D1 文件映射引用的残留对象，支持扫描和清理两种操作。
+
+### 11.1 扫描孤儿文件
+
+```http
+POST /api/orphan-cleanup
+Content-Type: application/json
+```
+
+**请求体（扫描）：**
+
+```json
+{
+  "action": "scan"
+}
+```
+
+**成功响应（200）：**
+
+```json
+{
+  "ok": true,
+  "action": "scan",
+  "orphans": [
+    { "key": "file_a1b2c3d4_unreferenced.bin", "size": 1048576 },
+    { "key": "r2drive_node_part_old_session_000001", "size": 33554432 }
+  ],
+  "totalSize": 34603008,
+  "totalObjects": 109
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `orphans` | array | 孤儿对象列表，每项包含 `key` 和 `size` |
+| `totalSize` | number | 孤儿对象总大小（字节） |
+| `totalObjects` | number | R2 存储桶中对象总数 |
+
+---
+
+### 11.2 清理孤儿文件
+
+```http
+POST /api/orphan-cleanup
+Content-Type: application/json
+```
+
+**请求体（清理）：**
+
+```json
+{
+  "action": "clean",
+  "keys": [
+    "file_a1b2c3d4_unreferenced.bin",
+    "r2drive_node_part_old_session_000001"
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `action` | string | 是 | 固定为 `"clean"` |
+| `keys` | string[] | 是 | 要删除的 R2 对象 key 列表 |
+
+**成功响应（200）：**
+
+```json
+{
+  "ok": true,
+  "action": "clean",
+  "deleted": 2,
+  "failed": 0,
+  "freedBytes": 34603008
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `deleted` | number | 成功删除的对象数 |
+| `failed` | number | 删除失败的对象数 |
+| `freedBytes` | number | 释放的存储空间（字节） |
+
+**失败响应（400）：**
+
+```json
+{
+  "ok": false,
+  "error": "no keys provided"
+}
+```
+
+---
+
+## 12. 错误码参考
 
 | 状态码 | 说明 | 常见原因 |
 |--------|------|---------|

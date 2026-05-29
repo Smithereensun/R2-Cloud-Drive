@@ -224,9 +224,9 @@
 r2-cloud-drive/
 ├── worker.js          # 主程序（Cloudflare Worker）
 ├── README.MD          # 本文件
-├── TECHNICAL_DOC      # 技术文档
-└── API说明文档.md     # 客户端/API 对接说明
- 
+├── TECHNICAL_DOC.MD   # 技术文档
+├── API说明文档.MD     # 客户端/API 对接说明
+└── version.json       # 版本信息，用于前端自动检查更新
 ```
 
 ## 技术栈

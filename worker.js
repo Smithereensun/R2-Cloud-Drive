@@ -908,13 +908,59 @@ function renderHTML(content, title = 'R2 云盘') {
       display: none;
     }
   }
+
+  /* ── Version Update Badge ── */
+  .version-info {
+    display: inline-flex; align-items: center; gap: 6px;
+    cursor: pointer; position: relative;
+    text-decoration: none; color: inherit;
+    transition: color .15s;
+  }
+  .version-info:hover { color: var(--primary); }
+  .version-badge {
+    display: none;
+    font-size: 10px; font-weight: 700;
+    background: var(--error); color: #fff;
+    border-radius: 10px; padding: 1px 7px;
+    line-height: 1.6; white-space: nowrap;
+    animation: versionPulse 2s ease-in-out infinite;
+  }
+  .version-badge.show { display: inline; }
+  @keyframes versionPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .65; }
+  }
+  .version-tooltip {
+    display: none; position: absolute; bottom: calc(100% + 10px); left: 50%;
+    transform: translateX(-50%); background: var(--surface);
+    border: 1px solid var(--outline); border-radius: var(--radius-m);
+    box-shadow: var(--shadow-3); padding: 14px 18px; min-width: 260px;
+    z-index: 500; text-align: left; cursor: default;
+  }
+  .version-info:hover .version-tooltip { display: block; }
+  .version-tooltip-title {
+    font-size: 14px; font-weight: 600; color: var(--on-surface); margin-bottom: 6px;
+  }
+  .version-tooltip-body { font-size: 12px; color: var(--on-surface-variant); line-height: 1.6; margin-bottom: 10px; }
+  .version-tooltip-link {
+    font-size: 12px; color: var(--primary); text-decoration: none; font-weight: 500;
+  }
+  .version-tooltip-link:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 ${content}
 
 <footer class="foot-bar">
-  <span>v1.1.5</span>
+  <span class="version-info" id="versionInfo" title="检查更新">
+    <span>v1.1.5</span>
+    <span class="version-badge" id="versionBadge">有新版本</span>
+    <span class="version-tooltip" id="versionTooltip">
+      <div class="version-tooltip-title">版本更新检查</div>
+      <div class="version-tooltip-body" id="versionTooltipBody">正在检查...</div>
+      <a class="version-tooltip-link" id="versionTooltipLink" href="https://github.com/HandsomeMJZ/R2-Cloud-Drive" target="_blank" rel="noopener noreferrer">前往 GitHub 查看 →</a>
+    </span>
+  </span>
   <span class="foot-bar-sep">|</span>
   <a href="https://github.com/HandsomeMJZ" target="_blank" rel="noopener noreferrer">Github@HandsomeMJZ</a>
   <span class="foot-bar-sep">|</span>
@@ -2290,6 +2336,78 @@ function sortTable(by) {
 // ── Logout ──
 function logout() { fetch('/api/logout', { method: 'POST' }).then(() => location.href = '/login'); }
 
+// ── Version Check ──
+const CURRENT_VERSION = '1.1.5';
+const CURRENT_VERSION_CODE = 115;
+const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/main/version.json';
+const VERSION_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours between checks
+
+async function checkVersionUpdate() {
+  const badge = document.getElementById('versionBadge');
+  const tooltipBody = document.getElementById('versionTooltipBody');
+  if (!badge || !tooltipBody) return;
+
+  // Skip check if we already checked recently (sessionStorage)
+  const lastCheck = sessionStorage.getItem('r2versionLastCheck');
+  if (lastCheck && Date.now() - parseInt(lastCheck) < VERSION_CHECK_INTERVAL) {
+    const cached = sessionStorage.getItem('r2versionCached');
+    if (cached) {
+      try { applyVersionResult(JSON.parse(cached)); } catch {/* ignore */}
+      return;
+    }
+  }
+
+  try {
+    const res = await fetch(VERSION_CHECK_URL, { cache: 'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    sessionStorage.setItem('r2versionLastCheck', String(Date.now()));
+    sessionStorage.setItem('r2versionCached', JSON.stringify(data));
+    applyVersionResult(data);
+  } catch (err) {
+    console.warn('[versionCheck] fetch failed:', err.message || err);
+    if (tooltipBody) tooltipBody.textContent = '无法获取最新版本信息，请检查网络连接。';
+  }
+}
+
+function applyVersionResult(data) {
+  const badge = document.getElementById('versionBadge');
+  const tooltipBody = document.getElementById('versionTooltipBody');
+  const tooltipLink = document.getElementById('versionTooltipLink');
+
+  const latestVersion = data.version || '?';
+  const latestCode = Number(data.versionCode || 0);
+  const releaseDate = data.releaseDate || '';
+  const releaseNotes = data.releaseNotes || '暂无更新说明';
+  const downloadUrl = data.downloadUrl || 'https://github.com/HandsomeMJZ/R2-Cloud-Drive';
+
+  if (latestCode > CURRENT_VERSION_CODE) {
+    if (badge) badge.classList.add('show');
+    if (tooltipBody) {
+      tooltipBody.innerHTML =
+        '<span style="color:var(--error);font-weight:600">发现新版本 v' + escapeHtml(latestVersion) + '</span><br>' +
+        '当前版本：v' + escapeHtml(CURRENT_VERSION) + '<br>' +
+        '发布日期：' + escapeHtml(releaseDate || '未知') + '<br>' +
+        '<span style="display:block;margin-top:6px;padding-top:6px;border-top:1px solid var(--outline)">' + escapeHtml(releaseNotes) + '</span>';
+    }
+    if (tooltipLink) {
+      tooltipLink.href = downloadUrl;
+      tooltipLink.textContent = '前往下载最新版本 →';
+    }
+  } else {
+    if (badge) badge.classList.remove('show');
+    if (tooltipBody) {
+      tooltipBody.innerHTML =
+        '<span style="color:var(--success);font-weight:600">已是最新版本</span><br>' +
+        '当前版本：v' + escapeHtml(CURRENT_VERSION) + '<br>' +
+        '远程版本：v' + escapeHtml(latestVersion);
+    }
+    if (tooltipLink) {
+      tooltipLink.textContent = '前往 GitHub 查看 →';
+    }
+  }
+}
+
 // ── Init ──
 document.addEventListener('DOMContentLoaded', () => {
   setView(viewMode);
@@ -2298,6 +2416,7 @@ document.addEventListener('DOMContentLoaded', () => {
   checkClipboardFromStore();
   updateStorageInfo();
   updateActionBar();
+  checkVersionUpdate();
 });
 </script>
 </body>
