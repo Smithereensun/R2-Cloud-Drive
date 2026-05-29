@@ -1,7 +1,7 @@
 /**
  * R2 Cloud Drive - Cloudflare Worker
  * Material Design Style
- * 
+ * By HandsomeMJZ
  * ============================================
  * 配置说明 (Configuration)
  * ============================================
