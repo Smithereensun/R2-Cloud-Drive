@@ -915,6 +915,8 @@ function renderHTML(content, title = 'R2 云盘') {
     cursor: pointer; position: relative;
     text-decoration: none; color: inherit;
     transition: color .15s;
+    /* Expand hover area upward so the mouse doesn't lose hover when bridging to tooltip */
+    padding-top: 6px; margin-top: -6px;
   }
   .version-info:hover { color: var(--primary); }
   .version-badge {
@@ -930,14 +932,30 @@ function renderHTML(content, title = 'R2 云盘') {
     0%, 100% { opacity: 1; }
     50% { opacity: .65; }
   }
+  /* Transparent hover bridge — keeps :hover active while cursor crosses the gap */
+  .version-info::before {
+    content: ''; position: absolute;
+    bottom: 100%; left: 0; right: 0;
+    height: 22px;
+    background: transparent;
+  }
   .version-tooltip {
-    display: none; position: absolute; bottom: calc(100% + 10px); left: 50%;
-    transform: translateX(-50%); background: var(--surface);
+    opacity: 0; visibility: hidden;
+    pointer-events: none;
+    position: absolute; bottom: calc(100% + 4px); left: 50%;
+    transform: translateX(-50%) translateY(6px);
+    background: var(--surface);
     border: 1px solid var(--outline); border-radius: var(--radius-m);
     box-shadow: var(--shadow-3); padding: 14px 18px; min-width: 260px;
     z-index: 500; text-align: left; cursor: default;
+    transition: opacity .2s ease, visibility .2s ease, transform .2s cubic-bezier(.4,0,.2,1);
+    transition-delay: .3s; /* delay hiding — gives time to reach the link */
   }
-  .version-info:hover .version-tooltip { display: block; }
+  .version-info:hover .version-tooltip {
+    opacity: 1; visibility: visible;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+    transition-delay: 0s; /* show instantly */
   .version-tooltip-title {
     font-size: 14px; font-weight: 600; color: var(--on-surface); margin-bottom: 6px;
   }
@@ -2339,38 +2357,41 @@ function logout() { fetch('/api/logout', { method: 'POST' }).then(() => location
 // ── Version Check ──
 const CURRENT_VERSION = '1.1.5';
 const CURRENT_VERSION_CODE = 115;
-const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/main/version.json';
-const VERSION_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours between checks
+const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/refs/heads/main/version.json';
+const VERSION_CHECK_INTERVAL = 30 * 60 * 1000; // 30 minutes between auto checks
 
-async function checkVersionUpdate() {
+async function checkVersionUpdate(force = false) {
   const badge = document.getElementById('versionBadge');
   const tooltipBody = document.getElementById('versionTooltipBody');
   if (!badge || !tooltipBody) return;
 
-  // Skip check if we already checked recently (sessionStorage)
+  // Skip check if we already checked recently (unless forced)
   const lastCheck = sessionStorage.getItem('r2versionLastCheck');
-  if (lastCheck && Date.now() - parseInt(lastCheck) < VERSION_CHECK_INTERVAL) {
+  if (!force && lastCheck && Date.now() - parseInt(lastCheck) < VERSION_CHECK_INTERVAL) {
     const cached = sessionStorage.getItem('r2versionCached');
     if (cached) {
-      try { applyVersionResult(JSON.parse(cached)); } catch {/* ignore */}
+      try { applyVersionResult(JSON.parse(cached), parseInt(lastCheck)); } catch {/* ignore */}
       return;
     }
   }
+
+  if (tooltipBody) tooltipBody.textContent = '正在检查更新...';
 
   try {
     const res = await fetch(VERSION_CHECK_URL, { cache: 'no-cache' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    sessionStorage.setItem('r2versionLastCheck', String(Date.now()));
+    const now = Date.now();
+    sessionStorage.setItem('r2versionLastCheck', String(now));
     sessionStorage.setItem('r2versionCached', JSON.stringify(data));
-    applyVersionResult(data);
+    applyVersionResult(data, now);
   } catch (err) {
     console.warn('[versionCheck] fetch failed:', err.message || err);
-    if (tooltipBody) tooltipBody.textContent = '无法获取最新版本信息，请检查网络连接。';
+    if (tooltipBody) tooltipBody.textContent = '无法获取最新版本信息，请检查网络连接。点击此处重试。';
   }
 }
 
-function applyVersionResult(data) {
+function applyVersionResult(data, checkedAt) {
   const badge = document.getElementById('versionBadge');
   const tooltipBody = document.getElementById('versionTooltipBody');
   const tooltipLink = document.getElementById('versionTooltipLink');
@@ -2381,6 +2402,9 @@ function applyVersionResult(data) {
   const releaseNotes = data.releaseNotes || '暂无更新说明';
   const downloadUrl = data.downloadUrl || 'https://github.com/HandsomeMJZ/R2-Cloud-Drive';
 
+  const agoMin = checkedAt ? Math.max(0, Math.floor((Date.now() - checkedAt) / 60000)) : 0;
+  const agoStr = agoMin < 1 ? '刚刚' : (agoMin + ' 分钟前');
+
   if (latestCode > CURRENT_VERSION_CODE) {
     if (badge) badge.classList.add('show');
     if (tooltipBody) {
@@ -2388,7 +2412,8 @@ function applyVersionResult(data) {
         '<span style="color:var(--error);font-weight:600">发现新版本 v' + escapeHtml(latestVersion) + '</span><br>' +
         '当前版本：v' + escapeHtml(CURRENT_VERSION) + '<br>' +
         '发布日期：' + escapeHtml(releaseDate || '未知') + '<br>' +
-        '<span style="display:block;margin-top:6px;padding-top:6px;border-top:1px solid var(--outline)">' + escapeHtml(releaseNotes) + '</span>';
+        '<span style="display:block;margin-top:6px;padding-top:6px;border-top:1px solid var(--outline)">' + escapeHtml(releaseNotes) + '</span>' +
+        '<span style="display:block;margin-top:8px;font-size:11px;color:var(--on-surface-variant)">上次检查：' + agoStr + ' · 点击版本号重新检查</span>';
     }
     if (tooltipLink) {
       tooltipLink.href = downloadUrl;
@@ -2400,7 +2425,8 @@ function applyVersionResult(data) {
       tooltipBody.innerHTML =
         '<span style="color:var(--success);font-weight:600">已是最新版本</span><br>' +
         '当前版本：v' + escapeHtml(CURRENT_VERSION) + '<br>' +
-        '远程版本：v' + escapeHtml(latestVersion);
+        '远程版本：v' + escapeHtml(latestVersion) +
+        '<span style="display:block;margin-top:6px;font-size:11px;color:var(--on-surface-variant)">上次检查：' + agoStr + ' · 点击版本号重新检查</span>';
     }
     if (tooltipLink) {
       tooltipLink.textContent = '前往 GitHub 查看 →';
@@ -2417,6 +2443,11 @@ document.addEventListener('DOMContentLoaded', () => {
   updateStorageInfo();
   updateActionBar();
   checkVersionUpdate();
+  // Click version info to force re-check
+  document.getElementById('versionInfo')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    checkVersionUpdate(true);
+  });
 });
 </script>
 </body>
