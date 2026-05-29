@@ -1,6 +1,6 @@
 /**
  * R2 Cloud Drive - Cloudflare Worker
- * Google Material Design Style
+ * Material Design Style
  * 
  * ============================================
  * 配置说明 (Configuration)
@@ -158,8 +158,7 @@ function renderHTML(content, title = 'R2 云盘') {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${title}</title>
-<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/material-icons@1.13.12/iconfont/round.css" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -182,8 +181,8 @@ function renderHTML(content, title = 'R2 云盘') {
     --radius-m: 8px;
     --radius-l: 16px;
     --radius-xl: 28px;
-    --font-display: 'Google Sans', sans-serif;
-    --font-body: 'Roboto', sans-serif;
+    --font-display: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
   }
 
   /* ── Dark Mode ── */
@@ -243,6 +242,29 @@ function renderHTML(content, title = 'R2 云盘') {
     display: flex; align-items: center; justify-content: center;
     color: white; font-size: 20px;
     overflow: hidden; flex-shrink: 0;
+  }
+  /* Material Icons Round：jsDelivr CDN 提供 @font-face 和基础样式，此处增强对齐和尺寸稳定性 */
+  .material-icons-round {
+    font-family: "Material Icons Round";
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    flex-shrink: 0;
+    vertical-align: middle;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "liga";
   }
   .logo-icon .material-icons-round { font-size: inherit; }
   .logo-icon-custom { background: transparent; }
@@ -909,30 +931,30 @@ ${content}
 
 <div class="context-menu" id="contextMenu">
   <div class="context-menu-item" onclick="ctxCopy()">
-    <span class="material-icons-round">content_copy</span> 复制
+    <span class="material-icons-round">content_copy</span><span>复制</span>
   </div>
   <div class="context-menu-item" onclick="ctxCut()">
-    <span class="material-icons-round">content_cut</span> 剪切
+    <span class="material-icons-round">content_cut</span><span>剪切</span>
   </div>
   <div class="context-menu-item" onclick="ctxPaste()">
-    <span class="material-icons-round">content_paste</span> 粘贴
+    <span class="material-icons-round">content_paste</span><span>粘贴</span>
   </div>
   <div class="context-menu-divider"></div>
   <div class="context-menu-item" onclick="ctxPreview()">
-    <span class="material-icons-round">visibility</span> 预览
+    <span class="material-icons-round">visibility</span><span>预览</span>
   </div>
   <div class="context-menu-item" onclick="ctxDownload()">
-    <span class="material-icons-round">download</span> 下载
+    <span class="material-icons-round">download</span><span>下载</span>
   </div>
   <div class="context-menu-item" onclick="ctxRename()">
-    <span class="material-icons-round">drive_file_rename_outline</span> 重命名
+    <span class="material-icons-round">drive_file_rename_outline</span><span>重命名</span>
   </div>
   <div class="context-menu-item" onclick="ctxCopyLink()">
-    <span class="material-icons-round">link</span> 复制链接
+    <span class="material-icons-round">link</span><span>复制链接</span>
   </div>
   <div class="context-menu-divider"></div>
   <div class="context-menu-item danger" onclick="ctxDelete()">
-    <span class="material-icons-round">delete_outline</span> 删除
+    <span class="material-icons-round">delete_outline</span><span>删除</span>
   </div>
 </div>
 
@@ -1589,11 +1611,36 @@ function showCtxMenu(e, name) {
   e.preventDefault(); e.stopPropagation();
   ctxTarget = name;
   const menu = document.getElementById('contextMenu');
+  if (!menu) return;
+
+  // 先让菜单可见并移到屏幕外，以便测量真实尺寸
   menu.classList.add('open');
-  let x = e.clientX, y = e.clientY;
-  if (x + 200 > window.innerWidth) x = window.innerWidth - 200;
-  if (y + 200 > window.innerHeight) y = window.innerHeight - 200;
-  menu.style.left = x + 'px'; menu.style.top = y + 'px';
+  menu.style.left = '-9999px';
+  menu.style.top = '-9999px';
+
+  // 强制重排以获取准确尺寸
+  const menuW = menu.offsetWidth;
+  const menuH = menu.offsetHeight;
+
+  // 计算菜单位置，确保不超出屏幕边界（留 8px 安全边距）
+  const MARGIN = 8;
+  let x = e.clientX;
+  let y = e.clientY;
+
+  // 右侧溢出：向左偏移
+  if (x + menuW > window.innerWidth - MARGIN) {
+    x = Math.max(MARGIN, window.innerWidth - menuW - MARGIN);
+  }
+  // 底部溢出：向上偏移
+  if (y + menuH > window.innerHeight - MARGIN) {
+    y = Math.max(MARGIN, window.innerHeight - menuH - MARGIN);
+  }
+  // 确保不超出左/上边界
+  x = Math.max(MARGIN, x);
+  y = Math.max(MARGIN, y);
+
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
 }
 document.addEventListener('click', () => document.getElementById('contextMenu')?.classList.remove('open'));
 document.addEventListener('keydown', e => {
@@ -3908,6 +3955,7 @@ async function allocateDistributedParts(env, nodes, partSizes) {
   });
 
   // 计算每个节点的剩余容量，用于加权轮询分配
+  // 使用平方加权：剩余容量的平方作为权重，使空余容量大的节点（如新增节点）获得指数级优先分配
   const capacities = sorted.map(u => Math.max(1, u.total - u.used - u.assigned));
   const totalCapacity = capacities.reduce((s, c) => s + c, 0);
 
@@ -3918,7 +3966,8 @@ async function allocateDistributedParts(env, nodes, partSizes) {
     for (let j = 0; j < sorted.length; j++) {
       const remaining = Math.max(1, sorted[j].total - sorted[j].used - sorted[j].assigned);
       const assignedCount = result.filter(r => r === sorted[j].node).length;
-      const score = (remaining / totalCapacity) / (assignedCount + 1);
+      // 平方加权：remaining² / totalCapacity，使剩余空间2倍的节点获得4倍权重
+      const score = (remaining * remaining / totalCapacity) / (assignedCount + 1);
       if (score > bestScore) {
         bestScore = score;
         bestIdx = j;

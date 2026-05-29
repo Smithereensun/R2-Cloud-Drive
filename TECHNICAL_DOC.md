@@ -340,62 +340,110 @@ if (path === '/api/upload' && request.method === 'POST') {
 
 session key：`r2multipart_session_<uploadId>`，TTL 24 小时。
 
-### 7.3 分布式上传
+### 7.3 分布式上传（文件映射 + 分片存储）
 
-初始化时会构造候选节点：
+#### 7.3.1 核心概念：两层解耦
 
-```js
-const nodes = [mainStorageNode(), ...await getStorageNodes(env)];
-const allocatedNodes = await allocateDistributedParts(env, nodes, partSizes);
+虚拟文件系统通过 **文件映射表（D1）** + **分片存储（R2）** 两层解耦实现分布式存储。用户看到的是虚拟路径，实际数据以分片形式散落在各节点 R2 中，主控 R2 只保存 manifest 索引。
+
+| 概念 | 存储位置 | 内容 | 类比 |
+|------|---------|------|------|
+| **虚拟路径** | 用户心智模型 | `videos/movie.mp4` | 你看到的文件名 |
+| **文件映射（D1 entry）** | 主控 D1 | `{storageKey: "manifest_xyz", storageType: "distributed", size: 1GB}` | 文件的"身份证" |
+| **Manifest（分片索引）** | 主控 R2 | `{parts: [{nodeId:"node-1", key:"part_001", size:32MB}, ...]}` | 分片的"藏宝图" |
+| **分片（Part）** | 各节点 R2 | 实际二进制数据片段 | 拼图的"碎片" |
+
+#### 7.3.2 文件映射表（D1 → R2 的桥梁）
+
+每种 `storageType` 对应不同的映射逻辑：
+
+| storageType | D1 中的 storageKey | R2 中实际存储的内容 | 适用场景 |
+|------------|-------------------|-------------------|---------|
+| `r2` | `file_a1b2c3`（UUID） | 完整文件二进制 | 小文件直传 |
+| `distributed` | `manifest_d4e5f6`（UUID） | Manifest JSON → 指向各节点分片 | 大文件分布式 |
+| `multipart_session_*` | 临时 session key | 上传中的临时状态 | 上传进行中 |
+
+**文件复制时的去重**：当用户复制文件时，新旧虚拟路径的 D1 entry 指向**同一个 storageKey**，不会在 R2 中重复存储数据。删除时需检查该 storageKey 是否还有其他虚拟路径引用。
+
+```
+复制前:
+   D1: r2drive:fs:file:photos/a.jpg → storageKey: file_abc → R2: file_abc (实际数据)
+
+复制后 (photos/a.jpg → backup/a.jpg):
+   D1: r2drive:fs:file:photos/a.jpg  → storageKey: file_abc ─┐
+   D1: r2drive:fs:file:backup/a.jpg  → storageKey: file_abc ─┤ 指向同一个 R2 对象
+                                                              │
+   R2: file_abc (实际数据) ←────────────────────────────────┘
 ```
 
-每个 part 会被分配到主控 R2 或外部节点：
+#### 7.3.3 分布式文件的分片结构
 
-```js
-parts.push({
-  partNumber,
-  size: partSize,
-  key: partKey,
-  storageType: isMain ? 'r2' : 'node',
-  nodeId: isMain ? MAIN_STORAGE_NODE_ID : node.id,
-  nodeName: isMain ? '主控账号' : node.name,
-  nodeUrl: isMain ? '' : node.url,
-  token: isMain ? '' : node.token,
-  uploadUrl: isMain
-    ? '/api/distributed/main-part?...'
-    : node.url + '/api/node/part?key=' + encodeURIComponent(partKey) + '&size=' + partSize
-});
+以 1 GB 的 `movie.mp4` 为例，分 32 个 32 MB 分片，分配到 3 个节点（主控 + 节点A + 节点B）：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  D1 文件映射                                                     │
+│  key: "r2drive:fs:file:videos/movie.mp4"                        │
+│  value: { storageKey: "manifest_xyz", storageType: "distributed" }│
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ 指向
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  主控 R2: manifest_xyz (Manifest JSON)                           │
+│  {                                                               │
+│    "type": "distributed-file",                                   │
+│    "version": 1,                                                 │
+│    "size": 1073741824,                                           │
+│    "contentType": "video/mp4",                                   │
+│    "parts": [                                                    │
+│      { "partNumber": 1,  "size": 32MB, "nodeId": "main",        │
+│        "key": "r2drive_node_part_sessionX_000001" },             │
+│      { "partNumber": 2,  "size": 32MB, "nodeId": "node-A",      │
+│        "key": "r2drive_node_part_sessionX_000002" },             │
+│      { "partNumber": 3,  "size": 32MB, "nodeId": "node-B",      │
+│        "key": "r2drive_node_part_sessionX_000003" },             │
+│      ... (共 32 个 part)                                         │
+│    ]                                                             │
+│  }                                                               │
+└───────┬──────────────────┬──────────────────┬───────────────────┘
+        │ 主控 R2          │ 节点A R2          │ 节点B R2
+        ▼                  ▼                  ▼
+   ┌─────────┐       ┌─────────┐       ┌─────────┐
+   │ part_001│       │ part_002│       │ part_003│
+   │ (32 MB) │       │ (32 MB) │       │ (32 MB) │
+   ├─────────┤       ├─────────┤       ├─────────┤
+   │ part_004│       │ part_005│       │ part_006│
+   │ (32 MB) │       │ (32 MB) │       │ (32 MB) │
+   ├─────────┤       ├─────────┤       ├─────────┤
+   │  ...    │       │  ...    │       │  ...    │
+   └─────────┘       └─────────┘       └─────────┘
+   主控 12 个 part    节点A 10 个 part    节点B 10 个 part
 ```
 
-完成时主控不会把大文件拼回一个 R2 对象，而是在主 R2 写一个 manifest：
+#### 7.3.4 下载时的分片拼接
 
-```js
-const manifest = {
-  type: 'distributed-file',
-  version: MANIFEST_VERSION,
-  path: session.path,
-  size: session.size,
-  contentType: session.contentType,
-  createdAt: session.createdAt,
-  completedAt: new Date().toISOString(),
-  parts: session.parts.map(part => ({
-    partNumber: part.partNumber,
-    size: part.size,
-    key: part.key,
-    storageType: part.storageType || 'node',
-    nodeId: part.nodeId,
-    nodeName: part.nodeName,
-    nodeUrl: part.nodeUrl
-  }))
-};
-```
+下载 `movie.mp4` 时，Worker 按 manifest 的 parts 数组顺序，从各节点 R2 逐片拉取并流式拼接输出：
 
-然后：
+| 步骤 | 操作 | 数据来源 |
+|------|------|---------|
+| 1 | 读 D1 获取 `{storageKey: "manifest_xyz", storageType: "distributed"}` | 主控 D1 |
+| 2 | 读 R2 获取 manifest JSON，得到 32 个 part 的信息 | 主控 R2 |
+| 3 | 按 `partNumber` 排序 → 依次拉取每个 part | — |
+| 3a | `nodeId == "main"` → `R2.get(partKey)` | 主控 R2 |
+| 3b | `nodeId != "main"` → `fetch(nodeUrl + /api/node/part?key=...)` (Bearer token) | 外部节点 |
+| 4 | ReadableStream 流式拼接各 part → 返回给客户端 | Worker 内存 |
 
-- manifest JSON 写入主控 R2，`contentType = application/vnd.r2drive.manifest+json`。
-- D1 file entry 的 `storageType` 标记为 `distributed`。
-- `storage_node_usage:<nodeId>` 增加已用容量估算。
-- 临时 session 删除。
+#### 7.3.5 节点用量追踪
+
+主控 D1 维护 `storage_node_usage:<nodeId>` 记录各节点已上传的累计字节数，作为分配算法的 `used` 输入：
+
+| D1 Key | Value | 更新时机 |
+|--------|-------|---------|
+| `storage_node_usage:main` | `{"used": 402653184}` | 分布式上传 complete 时 +Δ |
+| `storage_node_usage:node-A` | `{"used": 335544320}` | 分布式上传 complete 时 +Δ |
+| `storage_node_usage:node-B` | `{"used": 335544320}` | 分布式上传 complete 时 +Δ |
+
+**容量估算 vs 实时查询**：分配节点时，`used` 取 D1 估算值和节点实时容量查询值的**最大值**，避免因容量统计延迟导致新上传过度分配给刚完成上传的节点。
 
 ## 8. 下载与 Range
 
@@ -497,6 +545,11 @@ function isNodeRequestAuthorized(request, env) {
 | `toggleDarkMode` | 深色模式 |
 
 代码是内嵌在 HTML 字符串中的脚本，修改时要注意模板字符串转义、中文和 `${...}` 插值。
+
+**前端资源（CDN 与字体）**：为了中国大陆访问速度，前端已不再引用 Google Fonts 和 Google Material Icons CDN：
+- 字体使用系统原生字体栈（`PingFang SC`、`Microsoft YaHei` 等），不依赖外部字体服务。
+- Material Icons 图标字体通过 BootCDN（`cdn.bootcdn.net`）加载，并额外定义了 `.material-icons-round` 的字体规则以兼容原有类名。
+- 如需恢复 Google 原版 CDN 或更换其他 CDN，修改 `renderHTML` 中的 `<link>` 标签和对应 CSS 变量即可。
 
 ## 11. 关键业务规则
 
