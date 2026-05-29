@@ -46,7 +46,7 @@ database_id = "your-database-id"
 | `CLOUD_ICON_URL` | 顶部/登录页图标 |
 | `LOGIN_BACKGROUND_URL` | 登录页背景图 |
 | `STORAGE_NODE_TOKEN` | 当前 Worker 作为存储节点时校验主控请求 |
-| `DOWNLOAD_RANGE_SIZE_MB` | 服务端拼接分布式文件时的内部读取片段大小，最大被限制到 32 MiB |
+| `DOWNLOAD_RANGE_SIZE_MB` | 服务端拼接分布式文件时的内部读取片段大小，范围 1~32 MiB，默认 32 MiB |
 
 ## 3. 代码分层速览
 
@@ -90,7 +90,7 @@ const DOWNLOAD_RANGE_SIZE_BYTES = 32 * 1024 * 1024;
 const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 512 * 1024;
 ```
 
-注意：前端也有一组上传/下载阈值常量。目前代码中直传阈值和分布式阈值都是 `512 * 1024`，即大于 512 KiB 会倾向走分布式逻辑；README 中的旧描述可能不完全一致。
+注意：前端也有一组上传/下载阈值常量。目前代码中直传阈值和分布式阈值都是 `512 * 1024`（512 KiB），即大于 512 KiB 会倾向走分布式逻辑；分布式失败时自动回退到 R2 Multipart Upload。每个分片最大 90 MiB，最多 10,000 个 part。
 
 ## 4. D1 元数据设计
 
@@ -509,20 +509,7 @@ function isNodeRequestAuthorized(request, env) {
 - 删除分布式文件时必须清理 manifest 中列出的所有 part，并更新节点用量估算。
 - 外部节点 token 不写入 manifest，只保存在主控 D1 的节点配置里。
 
-## 12. 修改建议与风险点
-
-优先注意这些点：
-
-1. 鉴权安全：`verifyToken` 没有重新校验 HMAC，生产环境应修复。
-2. 阈值一致性：README 与代码阈值可能不同，以代码为准。
-3. 单文件体积大：前端脚本和后端逻辑都在模板字符串中，改 UI 时容易破坏字符串。
-4. D1 KV 表是通用 key-value，改 key 前缀会影响历史数据兼容。
-5. 分布式上传完成前 session 只有 24 小时 TTL，超时后需要前端重新上传。
-6. `clipboard` API 在当前代码中放在鉴权前，默认对外可访问；如果剪贴板信息敏感，应移到鉴权后或绑定 session。
-7. 节点容量默认按每节点 10 GB 计算，不一定等于 Cloudflare 账户真实限制。
-8. `DOWNLOAD_RANGE_SIZE_MB` 被 `getDownloadRangeSize` 限制在 1 MiB 到 32 MiB。
-
-## 13. 快速定位清单
+## 12. 快速定位清单
 
 想改登录：
 
