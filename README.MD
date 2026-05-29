@@ -4,9 +4,9 @@
 
 [![Telegram](https://img.shields.io/badge/Telegram-@HandsomMJZ-blue?logo=telegram)](https://t.me/HandsomMJZ)
 
-[API 对接说明文档](./API说明文档.md)
+[API 对接说明文档](./API说明文档.MD)
 
-[技术说明文档](./TECHNICAL_DOC.md)
+[技术说明文档](./TECHNICAL_DOC.MD)
 
 ![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_2026-05-28_201024_028.png)
 
