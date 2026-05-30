@@ -38,11 +38,6 @@
 
 ## 部署教程
 
-### 前置条件
-
-- [Cloudflare](https://dash.cloudflare.com/) 账号
-- [PayPal](https://www.paypal.com/)你的cloudflare账号必须绑定PayPal,否则无法创建R2存储桶
-
 ### 步骤 1：创建 R2 存储桶
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
