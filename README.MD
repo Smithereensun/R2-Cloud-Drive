@@ -10,7 +10,7 @@
 
 ![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2F%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_2026-05-28_201024_028.png)
 
-适用于桌面版的独立客户端![R2-Cloud-Drive-Client](https://github.com/HandsomeMJZ/R2-Cloud-Drive-Client),支持文件夹同步
+适用于桌面版的独立客户端 [R2-Cloud-Drive-Client](https://github.com/HandsomeMJZ/R2-Cloud-Drive-Client),支持文件夹同步
 
 ![截图](https://cloud.junzhen.qzz.io/api/download?path=shared%2FScreenShot_2026-05-31_225923_542.png)
 
