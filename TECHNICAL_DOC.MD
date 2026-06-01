@@ -85,6 +85,7 @@ const FS_FOLDER_PREFIX = 'r2drive:fs:folder:';
 const FS_DIR_PREFIX = 'r2drive:fs:dir:';
 const NODE_PART_PREFIX = 'r2drive_node_part_';
 const STORAGE_NODE_USAGE_PREFIX = 'storage_node_usage:';
+const BACKUP_DIRS_PREFIX = 'backup_dirs:';
 
 const MANIFEST_CONTENT_TYPE = 'application/vnd.r2drive.manifest+json';
 const MANIFEST_VERSION = 1;
@@ -139,6 +140,7 @@ function requireFsKv(env) {
 | `multipart_session_<id>` | 分布式上传 session JSON | 分布式上传临时状态，24h TTL |
 | `r2multipart_session_<uploadId>` | R2 multipart session JSON | R2 multipart 上传临时状态，24h TTL |
 | `clipboard_<id>` | 剪贴板 JSON | 跨页面复制/剪切状态，24h TTL |
+| `backup_dirs:<clientId>` | 目录路径数组 JSON | 备份目录同步，用户跨设备保留同步目录，无过期 |
 
 虚拟路径处理重点：
 
@@ -239,7 +241,7 @@ export default {
 
 | 路由 | 方法 | 鉴权 | 作用 |
 | --- | --- | --- | --- |
-| `/api/node/*` | 多种 | 节点 token | 当前 Worker 作为存储节点时提供分片 PUT/GET/DELETE、ping、storage |
+| `/api/node/*` | 多种 | 节点 token | 当前 Worker 作为存储节点时提供分片 PUT/GET/DELETE、ping、storage、r2-list |
 | `/login` | GET | 否 | 登录页 |
 | `/api/login` | POST | 否 | 校验 `ACCESS_PASSWORD`，写 cookie |
 | `/api/logout` | POST | 否 | 清理 cookie |
@@ -257,6 +259,7 @@ export default {
 | `/api/storage` | GET | 总容量和各节点容量 |
 | `/api/storage-nodes` | GET/POST/DELETE | 管理外部存储节点 |
 | `/api/storage-nodes/test?id=` | POST | 测试节点连通和容量 |
+| `/api/storage-nodes/r2-files?id=&cursor=` | GET | 浏览节点/主控 R2 对象列表（v1.1.6） |
 | `/api/download?path=` | GET/HEAD | 下载/预览文件，支持 Range |
 | `/api/upload?path=` | POST | 普通直传到主 R2 |
 | `/api/multipart/init` | POST | 初始化 R2 multipart 上传 |
@@ -273,6 +276,10 @@ export default {
 | `/api/orphan-cleanup` | POST | 孤儿文件扫描（`action: "scan"`）与清理（`action: "clean"`） |
 | `/api/rename` | POST | 移动/重命名 |
 | `/api/mkdir` | POST | 创建文件夹 |
+| `/api/backup-dirs` | GET | 获取客户端备份目录列表 |
+| `/api/backup-dirs` | POST | 批量替换客户端备份目录（全量同步） |
+| `/api/backup-dirs/add` | POST | 添加单个备份目录 |
+| `/api/backup-dirs` | DELETE | 删除备份目录（指定 path）或清空全部 |
 
 鉴权逻辑：
 
@@ -519,6 +526,7 @@ function isNodeRequestAuthorized(request, env) {
 | --- | --- | --- |
 | `/api/node/ping` | GET | 健康检查 |
 | `/api/node/storage` | GET | 统计节点 R2 已用容量和总容量 |
+| `/api/node/r2-list?cursor=&limit=` | GET | 列出节点 R2 对象，支持分页（v1.1.6） |
 | `/api/node/part?key=&size=` | PUT | 保存分片 |
 | `/api/node/part?key=` | GET/HEAD | 读取分片，支持 Range |
 | `/api/node/part?key=` | DELETE | 删除分片 |
@@ -546,6 +554,7 @@ function isNodeRequestAuthorized(request, env) {
 | `uploadFiles` / `uploadSingleFile` | 上传调度 |
 | `downloadInRanges` | 大文件分段下载 |
 | `loadStorageNodes` / `saveStorageNode` | 节点管理弹窗 |
+| `viewNodeR2Files` / `loadNodeR2Files` / `renderNodeR2Files` | R2 文件浏览（v1.1.6），在存储节点弹窗内分页查看各节点 R2 对象 |
 | `updateStorageInfo` | 容量显示 |
 | `toggleDarkMode` | 深色模式 |
 
@@ -630,7 +639,54 @@ function isNodeRequestAuthorized(request, env) {
 - 前端：`checkVersionUpdate` / `applyVersionResult`
 - 前端常量：`CURRENT_VERSION` / `CURRENT_VERSION_CODE` / `VERSION_CHECK_URL`
 
-## 13. 版本更新检查
+## 15. 备份目录同步（v1.1.7 新增）
+
+纯 API 功能，不在前端 UI 中体现。用于用户独立客户端跨设备保留同步目录配置。
+
+### 设计思路
+
+- 每个客户端使用唯一 `clientId` 标识自身（如设备 UUID、用户自定义名称）。
+- 服务端以 `backup_dirs:{clientId}` 为 key 在 D1 KV 中存储该客户端的备份目录路径数组（JSON 格式）。
+- 客户端可在启动时从服务端拉取目录列表，关闭时推送更新，实现跨设备同步。
+
+### API 端点
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| GET | `/api/backup-dirs?clientId=` | 获取客户端已保存的备份目录列表 |
+| POST | `/api/backup-dirs` | 全量替换备份目录（用于完整同步） |
+| POST | `/api/backup-dirs/add` | 添加单个备份目录 |
+| DELETE | `/api/backup-dirs?clientId=&path=` | 删除指定目录（不传 path 则清空全部） |
+
+### 核心函数
+
+| 函数 | 作用 |
+|------|------|
+| `getBackupDirs(env, clientId)` | 获取客户端备份目录列表 |
+| `saveBackupDirs(env, clientId, dirs)` | 全量保存（会去重） |
+| `addBackupDir(env, clientId, dirPath)` | 添加单个目录（不重复） |
+| `removeBackupDir(env, clientId, dirPath)` | 移除单个目录 |
+| `clearBackupDirs(env, clientId)` | 清空客户端所有目录 |
+
+### 典型集成模式（独立客户端）
+
+```
+// 1. 启动时拉取同步目录
+const res = await fetch('/api/backup-dirs?clientId=' + deviceId);
+const { dirs } = await res.json();
+// dirs = ["photos/2024", "documents/work", ...]
+// 客户端根据 dirs 设置本地同步任务
+
+// 2. 用户修改同步目录后推送更新
+await fetch('/api/backup-dirs', {
+  method: 'POST',
+  body: JSON.stringify({ clientId: deviceId, dirs: updatedDirs })
+});
+
+// 3. 设备 B 上同样用 deviceId，拉取相同的目录列表
+```
+
+## 16. 版本更新检查
 
 ### version.json
 
@@ -669,7 +725,7 @@ function isNodeRequestAuthorized(request, env) {
 3. 提交并推送到 GitHub main 分支
 4. 所有已部署的 Worker 实例会在用户下次访问时自动检测到更新
 
-## 14. 最小调用示例
+## 17. 最小调用示例
 
 登录：
 

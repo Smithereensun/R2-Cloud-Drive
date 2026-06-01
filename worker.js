@@ -49,6 +49,7 @@
  * - 夜间模式切换 (深色主题)
  * - 拖拽上传，上传进度显示
  * - 右键上下文菜单
+ * - 备份目录同步 API (/api/backup-dirs) — 跨设备保留同步目录
  */
 
 const MIME_TYPES = {
@@ -849,6 +850,38 @@ function renderHTML(content, title = 'R2 云盘') {
     .node-form-grid { grid-template-columns: 1fr; }
   }
 
+  /* ── R2 File Viewer (in storage node modal) ── */
+  .r2file-view { display: none; flex-direction: column; gap: 0; }
+  .r2file-view.open { display: flex; }
+  .r2file-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .r2file-toolbar .node-row-title { flex: 1; }
+  .r2file-list { display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 12px; }
+  .r2file-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: var(--radius-s);
+    border: 1px solid transparent;
+    font-size: 13px; font-family: 'Consolas','Monaco',monospace;
+    color: var(--on-surface);
+  }
+  .r2file-row:hover { background: rgba(60,64,67,.06); }
+  .r2file-key {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .r2file-size { font-size: 12px; color: var(--on-surface-variant); white-space: nowrap; flex-shrink: 0; }
+  .r2file-stats { font-size: 12px; color: var(--on-surface-variant); margin-bottom: 8px; }
+  .r2file-load-more { text-align: center; margin-top: 4px; }
+  .r2file-load-more button {
+    padding: 6px 20px; border: 1px solid var(--outline);
+    border-radius: var(--radius-xl); background: transparent;
+    cursor: pointer; font-size: 13px; color: var(--primary);
+    transition: background .15s;
+  }
+  .r2file-load-more button:hover { background: rgba(60,64,67,.08); }
+  .r2file-load-more button:disabled { opacity: .38; cursor: default; }
+  .node-view-toggle { display: none; }
+  .node-view-toggle.open { display: flex; }
+
   /* ── Orphan Cleanup ── */
   .orphan-list { display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 12px; }
   .orphan-row {
@@ -971,7 +1004,7 @@ ${content}
 
 <footer class="foot-bar">
   <span class="version-info" id="versionInfo" title="检查更新">
-    <span>v1.1.5</span>
+    <span>v1.1.7</span>
     <span class="version-badge" id="versionBadge">有新版本</span>
     <span class="version-tooltip" id="versionTooltip">
       <div class="version-tooltip-title">版本更新检查</div>
@@ -2221,10 +2254,13 @@ function uploadDistributedPart(partInfo, chunk, onProgress) {
 
 function openStorageNodes() {
   document.getElementById('storageNodesModal')?.classList.add('open');
+  backToNodeList();
   loadStorageNodes();
 }
 function closeStorageNodes() {
   document.getElementById('storageNodesModal')?.classList.remove('open');
+  // Reset R2 file viewer state
+  backToNodeList();
 }
 async function loadStorageNodes() {
   const list = document.getElementById('storageNodeList');
@@ -2244,7 +2280,13 @@ async function loadStorageNodes() {
     if (!res.ok) {
       throw new Error(data?.error || 'HTTP ' + res.status);
     }
-    renderStorageNodes(Array.isArray(data?.nodes) ? data.nodes : []);
+    const externalNodes = Array.isArray(data?.nodes) ? data.nodes : [];
+    // Always include main account as the first node
+    const allNodes = [
+      { id: 'main', name: '主控账号', url: '本地 R2 存储桶', enabled: true },
+      ...externalNodes
+    ];
+    renderStorageNodes(allNodes);
   } catch (err) {
     console.warn('loadStorageNodes failed:', err?.message || err);
     if (list) list.innerHTML = '<div class="node-row"><div class="node-row-main"><div class="node-row-sub">加载失败：' + escapeHtml((err?.message || '网络错误').slice(0, 40)) + '</div></div></div>';
@@ -2259,6 +2301,7 @@ function renderStorageNodes(nodes) {
   }
   list.innerHTML = '';
   nodes.forEach(node => {
+    const isMain = node.id === 'main';
     const row = document.createElement('div');
     row.className = 'node-row';
     const main = document.createElement('div');
@@ -2268,26 +2311,40 @@ function renderStorageNodes(nodes) {
     title.textContent = node.name || node.id || '';
     const sub = document.createElement('div');
     sub.className = 'node-row-sub';
-    sub.textContent = (node.url || '') + ' \u00B7 ' + (node.enabled !== false ? '启用' : '停用');
+    sub.textContent = isMain ? '本地 R2 存储桶' : ((node.url || '') + ' \u00B7 ' + (node.enabled !== false ? '启用' : '停用'));
     main.append(title, sub);
 
-    const testBtn = document.createElement('button');
-    testBtn.className = 'icon-btn';
-    testBtn.title = '测试';
-    testBtn.innerHTML = '<span class="material-icons-round">network_check</span>';
-    testBtn.addEventListener('click', function() {
-      testStorageNode(node.id);
+    const viewBtn = document.createElement('button');
+    viewBtn.className = 'icon-btn';
+    viewBtn.title = '查看R2文件';
+    viewBtn.innerHTML = '<span class="material-icons-round">folder_open</span>';
+    viewBtn.addEventListener('click', function() {
+      viewNodeR2Files(node.id, node.name || node.id);
     });
 
-    const delBtn = document.createElement('button');
-    delBtn.className = 'icon-btn';
-    delBtn.title = '删除';
-    delBtn.innerHTML = '<span class="material-icons-round">delete_outline</span>';
-    delBtn.addEventListener('click', function() {
-      deleteStorageNode(node.id);
-    });
+    row.append(main, viewBtn);
 
-    row.append(main, testBtn, delBtn);
+    // Only add test/delete for external nodes
+    if (!isMain) {
+      const testBtn = document.createElement('button');
+      testBtn.className = 'icon-btn';
+      testBtn.title = '测试';
+      testBtn.innerHTML = '<span class="material-icons-round">network_check</span>';
+      testBtn.addEventListener('click', function() {
+        testStorageNode(node.id);
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'icon-btn';
+      delBtn.title = '删除';
+      delBtn.innerHTML = '<span class="material-icons-round">delete_outline</span>';
+      delBtn.addEventListener('click', function() {
+        deleteStorageNode(node.id);
+      });
+
+      row.append(testBtn, delBtn);
+    }
+
     list.appendChild(row);
   });
 }
@@ -2329,6 +2386,120 @@ async function testStorageNode(id) {
   }
 }
 
+// ── R2 File Viewer ──
+let r2fileViewNodeId = '';
+let r2fileViewNodeName = '';
+let r2fileCursor = null;
+let r2fileTruncated = false;
+let r2fileAllObjects = [];
+
+function viewNodeR2Files(nodeId, nodeName) {
+  r2fileViewNodeId = nodeId;
+  r2fileViewNodeName = nodeName;
+  r2fileCursor = null;
+  r2fileTruncated = false;
+  r2fileAllObjects = [];
+
+  // Show R2 file view, hide node list and form
+  const nodeList = document.getElementById('storageNodeList');
+  const nodeForm = document.querySelector('.node-form-grid');
+  const r2fileView = document.getElementById('r2fileView');
+  const r2fileTitle = document.getElementById('r2fileTitle');
+
+  if (nodeList) nodeList.style.display = 'none';
+  if (nodeForm) nodeForm.style.display = 'none';
+  if (r2fileView) r2fileView.classList.add('open');
+  if (r2fileTitle) r2fileTitle.textContent = 'R2 文件 — ' + escapeHtml(nodeName);
+
+  document.getElementById('r2fileList').innerHTML = '<div style="padding:16px;color:var(--on-surface-variant);text-align:center">加载中...</div>';
+  document.getElementById('r2fileStats').textContent = '';
+  document.getElementById('r2fileLoadMore').style.display = 'none';
+
+  loadNodeR2Files();
+}
+
+function backToNodeList() {
+  const nodeList = document.getElementById('storageNodeList');
+  const nodeForm = document.querySelector('.node-form-grid');
+  const r2fileView = document.getElementById('r2fileView');
+
+  if (nodeList) nodeList.style.display = '';
+  if (nodeForm) nodeForm.style.display = '';
+  if (r2fileView) r2fileView.classList.remove('open');
+
+  r2fileViewNodeId = '';
+  r2fileViewNodeName = '';
+  r2fileCursor = null;
+  r2fileAllObjects = [];
+}
+
+async function loadNodeR2Files() {
+  const list = document.getElementById('r2fileList');
+  const stats = document.getElementById('r2fileStats');
+  const loadMore = document.getElementById('r2fileLoadMore');
+  const loadBtn = document.getElementById('r2fileLoadBtn');
+  if (!list) return;
+
+  if (!r2fileCursor) {
+    list.innerHTML = '<div style="padding:16px;color:var(--on-surface-variant);text-align:center"><span class="material-icons-round" style="animation:spin 1s linear infinite;display:block;margin:0 auto 8px">sync</span>正在获取文件列表...</div>';
+  } else {
+    if (loadBtn) { loadBtn.disabled = true; loadBtn.textContent = '加载中...'; }
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set('id', r2fileViewNodeId);
+    params.set('limit', '100');
+    if (r2fileCursor) params.set('cursor', r2fileCursor);
+    const res = await fetch('/api/storage-nodes/r2-files?' + params.toString());
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+
+    const objects = Array.isArray(data.objects) ? data.objects : [];
+    r2fileTruncated = !!data.truncated;
+    r2fileCursor = data.cursor || null;
+
+    if (!r2fileAllObjects.length) {
+      r2fileAllObjects = objects;
+    } else {
+      r2fileAllObjects = r2fileAllObjects.concat(objects);
+    }
+
+    const totalSize = r2fileAllObjects.reduce((sum, o) => sum + (o.size || 0), 0);
+    if (stats) {
+      stats.textContent = '共 ' + r2fileAllObjects.length + ' 个对象，总大小 ' + formatSize(totalSize) +
+        (r2fileTruncated ? '（还有更多...）' : '');
+    }
+
+    renderNodeR2Files(r2fileAllObjects);
+
+    if (loadMore) {
+      loadMore.style.display = r2fileTruncated ? '' : 'none';
+    }
+  } catch (err) {
+    if (list) list.innerHTML = '<div style="padding:16px;color:var(--error);text-align:center">加载失败：' + escapeHtml(err.message || '未知错误') + '</div>';
+  } finally {
+    if (loadBtn) { loadBtn.disabled = false; loadBtn.textContent = '加载更多...'; }
+  }
+}
+
+function renderNodeR2Files(objects) {
+  const list = document.getElementById('r2fileList');
+  if (!list) return;
+
+  if (!objects.length) {
+    list.innerHTML = '<div style="padding:24px;color:var(--on-surface-variant);text-align:center">此节点暂无 R2 对象</div>';
+    return;
+  }
+
+  list.innerHTML = objects.map(function(o) {
+    return '<div class="r2file-row">' +
+      '<span class="r2file-key" title="' + escapeHtml(o.key) + '">' + escapeHtml(o.key) + '</span>' +
+      '<span class="r2file-size">' + formatSize(o.size) + '</span>' +
+      '</div>';
+  }).join('');
+}
+
 function createFolder() {
   const name = document.getElementById('folderNameInput')?.value?.trim();
   if (!name) return;
@@ -2355,8 +2526,8 @@ function sortTable(by) {
 function logout() { fetch('/api/logout', { method: 'POST' }).then(() => location.href = '/login'); }
 
 // ── Version Check ──
-const CURRENT_VERSION = '1.1.5';
-const CURRENT_VERSION_CODE = 115;
+const CURRENT_VERSION = '1.1.7';
+const CURRENT_VERSION_CODE = 117;
 const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/refs/heads/main/version.json';
 const VERSION_CHECK_INTERVAL = 30 * 60 * 1000; // 30 minutes between auto checks
 
@@ -2997,6 +3168,21 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
     </div>
     <div class="modal-body">
       <div class="node-list" id="storageNodeList"></div>
+      <!-- R2 File Viewer (hidden by default) -->
+      <div class="r2file-view" id="r2fileView">
+        <div class="r2file-toolbar">
+          <button class="icon-btn" title="返回节点列表" onclick="backToNodeList()">
+            <span class="material-icons-round">arrow_back</span>
+          </button>
+          <span class="node-row-title" id="r2fileTitle">R2 文件</span>
+        </div>
+        <div class="r2file-stats" id="r2fileStats"></div>
+        <div class="r2file-list" id="r2fileList"></div>
+        <div class="r2file-load-more" id="r2fileLoadMore" style="display:none">
+          <button id="r2fileLoadBtn" onclick="loadNodeR2Files()">加载更多...</button>
+        </div>
+      </div>
+      <!-- End R2 File Viewer -->
       <div class="node-form-grid">
         <div>
           <label class="field-label" for="nodeNameInput">节点名称</label>
@@ -3077,6 +3263,7 @@ const DOWNLOAD_RANGE_SIZE_BYTES = 32 * 1024 * 1024;
 const DOWNLOAD_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const DOWNLOAD_NODE_FETCH_RETRIES = 3;
 const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 512 * 1024; // 512 KB - 超过此大小的文件使用分布式存储
+const BACKUP_DIRS_PREFIX = 'backup_dirs:'; // 备份目录同步 - 跨设备保留同步目录
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -3330,6 +3517,86 @@ function requireFsKv(env) {
   if (env.DB) return d1KvStore(env.DB);
   if (!env.CLIPBOARD_KV) throw new Error('DB binding is required for file path mapping');
   return env.CLIPBOARD_KV;
+}
+
+// ── Backup Directory Sync ──
+// 备份目录同步：用户独立客户端的备份目录保存，用于跨设备保留同步目录
+
+/**
+ * 获取指定客户端的备份目录列表
+ * @param {object} env - Worker 环境变量
+ * @param {string} clientId - 客户端唯一标识
+ * @returns {Promise<string[]>} 备份目录路径数组
+ */
+async function getBackupDirs(env, clientId) {
+  if (!clientId || !hasMetadataStore(env)) return [];
+  const raw = await requireFsKv(env).get(BACKUP_DIRS_PREFIX + clientId);
+  if (!raw) return [];
+  try {
+    const dirs = JSON.parse(raw);
+    return Array.isArray(dirs) ? dirs.filter(d => typeof d === 'string' && d.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 保存客户端备份目录列表（全量替换）
+ * @param {object} env - Worker 环境变量
+ * @param {string} clientId - 客户端唯一标识
+ * @param {string[]} dirs - 备份目录路径数组
+ */
+async function saveBackupDirs(env, clientId, dirs) {
+  if (!clientId || !hasMetadataStore(env)) return;
+  const cleanDirs = Array.isArray(dirs)
+    ? [...new Set(dirs.map(d => String(d || '').trim()).filter(Boolean))]
+    : [];
+  await requireFsKv(env).put(BACKUP_DIRS_PREFIX + clientId, JSON.stringify(cleanDirs));
+}
+
+/**
+ * 添加单个备份目录到客户端列表
+ * @param {object} env
+ * @param {string} clientId
+ * @param {string} dirPath
+ * @returns {Promise<string[]>} 更新后的目录列表
+ */
+async function addBackupDir(env, clientId, dirPath) {
+  const cleanPath = String(dirPath || '').trim();
+  if (!cleanPath) throw new Error('invalid path');
+  const dirs = await getBackupDirs(env, clientId);
+  if (!dirs.includes(cleanPath)) {
+    dirs.push(cleanPath);
+    await saveBackupDirs(env, clientId, dirs);
+  }
+  return dirs;
+}
+
+/**
+ * 移除客户端备份目录中的一个路径
+ * @param {object} env
+ * @param {string} clientId
+ * @param {string} dirPath
+ * @returns {Promise<string[]>} 更新后的目录列表
+ */
+async function removeBackupDir(env, clientId, dirPath) {
+  const cleanPath = String(dirPath || '').trim();
+  const dirs = await getBackupDirs(env, clientId);
+  const newDirs = dirs.filter(d => d !== cleanPath);
+  if (newDirs.length !== dirs.length) {
+    await saveBackupDirs(env, clientId, newDirs);
+  }
+  return newDirs;
+}
+
+/**
+ * 清空客户端所有备份目录
+ * @param {object} env
+ * @param {string} clientId
+ */
+async function clearBackupDirs(env, clientId) {
+  if (!clientId || !hasMetadataStore(env)) return;
+  await requireFsKv(env).delete(BACKUP_DIRS_PREFIX + clientId);
 }
 
 function normalizeVirtualPath(path = '') {
@@ -4885,6 +5152,24 @@ async function handleStorageNodeApi(request, env) {
     });
   }
 
+  if (url.pathname === '/api/node/r2-list' && request.method === 'GET') {
+    const cursor = url.searchParams.get('cursor') || undefined;
+    const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '100', 10) || 100));
+    const listed = await R2.list({ cursor, limit, include: ['customMetadata'] });
+    const objects = (listed.objects || []).map(obj => ({
+      key: obj.key,
+      size: obj.size || 0,
+      uploaded: obj.uploaded ? new Date(obj.uploaded).toISOString() : ''
+    }));
+    return new Response(JSON.stringify({
+      objects,
+      cursor: listed.cursor || null,
+      truncated: listed.truncated || false
+    }), {
+      headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+    });
+  }
+
   const key = url.searchParams.get('key');
   if (!key || key.includes('..')) return new Response('Missing key', { status: 400, headers: nodeCorsHeaders() });
 
@@ -5163,6 +5448,50 @@ export default {
         used: storageData.used || 0,
         total: storageData.total || STORAGE_TOTAL_BYTES
       });
+    }
+
+    // R2 file viewer — list objects for main or external storage node
+    if (path === '/api/storage-nodes/r2-files' && request.method === 'GET') {
+      try {
+        const id = url.searchParams.get('id') || 'main';
+        const cursor = url.searchParams.get('cursor') || undefined;
+        const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '100', 10) || 100));
+
+        if (id === 'main') {
+          // List R2 objects directly for the main account
+          const listed = await R2.list({ cursor, limit, include: ['customMetadata'] });
+          const objects = (listed.objects || []).map(obj => ({
+            key: obj.key,
+            size: obj.size || 0,
+            uploaded: obj.uploaded ? new Date(obj.uploaded).toISOString() : ''
+          }));
+          return jsonResponse({
+            objects,
+            cursor: listed.cursor || null,
+            truncated: listed.truncated || false
+          });
+        }
+
+        // Proxy to external node
+        const nodes = await getStorageNodes(env, true);
+        const node = nodes.find(item => item.id === id);
+        if (!node) return jsonResponse({ ok: false, error: 'node not found' }, 404);
+
+        const params = new URLSearchParams();
+        params.set('limit', String(limit));
+        if (cursor) params.set('cursor', cursor);
+        const nodeRes = await fetch(node.url + '/api/node/r2-list?' + params.toString(), {
+          headers: getNodeAuthHeaders(node)
+        });
+        if (!nodeRes.ok) {
+          return jsonResponse({ ok: false, error: 'node r2-list failed: ' + nodeRes.status }, 502);
+        }
+        const data = await nodeRes.json();
+        return jsonResponse(data);
+      } catch (err) {
+        console.error('r2-files failed:', err?.message || err);
+        return jsonResponse({ ok: false, error: 'r2-files failed: ' + (err?.message || 'unknown error') }, 500);
+      }
     }
 
     // List files
@@ -5642,6 +5971,57 @@ export default {
       if (!folderPath) return new Response('Missing path', { status: 400 });
       await putFolderEntry(env, folderPath);
       return Response.json({ ok: true });
+    }
+
+    // ── Backup Directory Sync API ──
+    // 备份目录同步：用户独立客户端的备份目录保存，用于跨设备保留同步目录
+
+    // 获取客户端备份目录列表
+    if (path === '/api/backup-dirs' && request.method === 'GET') {
+      const clientId = (url.searchParams.get('clientId') || '').trim();
+      if (!clientId) return jsonResponse({ ok: false, error: 'missing clientId' }, 400);
+      const dirs = await getBackupDirs(env, clientId);
+      return jsonResponse({ ok: true, clientId, dirs, count: dirs.length });
+    }
+
+    // 批量替换客户端备份目录（用于全量同步）
+    if (path === '/api/backup-dirs' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const clientId = String(body.clientId || '').trim();
+      if (!clientId) return jsonResponse({ ok: false, error: 'missing clientId' }, 400);
+      const dirs = Array.isArray(body.dirs) ? body.dirs : [];
+      await saveBackupDirs(env, clientId, dirs);
+      const saved = await getBackupDirs(env, clientId);
+      return jsonResponse({ ok: true, clientId, dirs: saved, count: saved.length });
+    }
+
+    // 添加单个备份目录
+    if (path === '/api/backup-dirs/add' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const clientId = String(body.clientId || '').trim();
+      const dirPath = String(body.path || '').trim();
+      if (!clientId) return jsonResponse({ ok: false, error: 'missing clientId' }, 400);
+      if (!dirPath) return jsonResponse({ ok: false, error: 'missing path' }, 400);
+      try {
+        const dirs = await addBackupDir(env, clientId, dirPath);
+        return jsonResponse({ ok: true, clientId, dirs, count: dirs.length });
+      } catch (err) {
+        return jsonResponse({ ok: false, error: err?.message || 'add failed' }, 400);
+      }
+    }
+
+    // 删除备份目录（可指定 path 删除单个，不指定则清空全部）
+    if (path === '/api/backup-dirs' && request.method === 'DELETE') {
+      const clientId = (url.searchParams.get('clientId') || '').trim();
+      const dirPath = (url.searchParams.get('path') || '').trim();
+      if (!clientId) return jsonResponse({ ok: false, error: 'missing clientId' }, 400);
+      if (dirPath) {
+        const dirs = await removeBackupDir(env, clientId, dirPath);
+        return jsonResponse({ ok: true, clientId, dirs, count: dirs.length, removed: dirPath });
+      } else {
+        await clearBackupDirs(env, clientId);
+        return jsonResponse({ ok: true, clientId, dirs: [], count: 0, cleared: true });
+      }
     }
 
     // ── UI Route ──
