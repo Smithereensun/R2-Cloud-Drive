@@ -119,7 +119,8 @@ function formatDate(date) {
   if (!date) return '-';
   return new Date(date).toLocaleString('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit'
+    hour: '2-digit', minute: '2-digit',
+    timeZone: 'Asia/Shanghai'
   });
 }
 
@@ -1004,7 +1005,7 @@ ${content}
 
 <footer class="foot-bar">
   <span class="version-info" id="versionInfo" title="检查更新">
-    <span>v1.1.7</span>
+    <span>v1.1.8</span>
     <span class="version-badge" id="versionBadge">有新版本</span>
     <span class="version-tooltip" id="versionTooltip">
       <div class="version-tooltip-title">版本更新检查</div>
@@ -2526,8 +2527,8 @@ function sortTable(by) {
 function logout() { fetch('/api/logout', { method: 'POST' }).then(() => location.href = '/login'); }
 
 // ── Version Check ──
-const CURRENT_VERSION = '1.1.7';
-const CURRENT_VERSION_CODE = 117;
+const CURRENT_VERSION = '1.1.8';
+const CURRENT_VERSION_CODE = 118;
 const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/HandsomeMJZ/R2-Cloud-Drive/refs/heads/main/version.json';
 const VERSION_CHECK_INTERVAL = 30 * 60 * 1000; // 30 minutes between auto checks
 

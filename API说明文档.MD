@@ -1,6 +1,6 @@
 # R2 Cloud Drive API 说明文档
 
-> 版本：v1.1.7
+> 版本：v1.1.8
 > 基础 URL：`https://your-worker.workers.dev`
 > 所有 API 响应均为 JSON 格式（除非标注为二进制/HTML）
 
