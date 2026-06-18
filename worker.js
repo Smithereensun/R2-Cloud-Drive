@@ -22,6 +22,7 @@
  * 3. 访问密码 (可选 - 不设置则为公开访问)
  *    在 Worker 环境变量中设置:
  *    ACCESS_PASSWORD = "your-password"
+ *    WEBDAV_USERNAME = "your-webdav-user"  // 可选，仅限制 WebDAV Basic Auth 用户名
  *
  * 4. 站点标题 (可选)
  *    SITE_TITLE = "My Cloud Drive"
@@ -5175,7 +5176,11 @@ function isWebDavAuthorized(request, env) {
   const match = header.match(/^Basic\s+(.+)$/i);
   if (!match) return false;
   const decoded = decodeBase64(match[1]);
-  const password = decoded.includes(':') ? decoded.slice(decoded.indexOf(':') + 1) : decoded;
+  const sep = decoded.indexOf(':');
+  const username = sep >= 0 ? decoded.slice(0, sep) : '';
+  const password = sep >= 0 ? decoded.slice(sep + 1) : decoded;
+  const expectedUsername = String(env.WEBDAV_USERNAME || '').trim();
+  if (expectedUsername && username !== expectedUsername) return false;
   return password === env.ACCESS_PASSWORD;
 }
 

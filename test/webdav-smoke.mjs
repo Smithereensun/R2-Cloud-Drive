@@ -93,18 +93,23 @@ function createR2() {
 
 const env = {
   ACCESS_PASSWORD: 'secret',
+  WEBDAV_USERNAME: 'davuser',
   CLIPBOARD_KV: createKv(),
   R2_BUCKET: createR2()
 };
 const ctx = { waitUntil() {} };
 
 function auth() {
-  return 'Basic ' + Buffer.from('user:secret').toString('base64');
+  return 'Basic ' + Buffer.from('davuser:secret').toString('base64');
+}
+
+function basic(user, password) {
+  return 'Basic ' + Buffer.from(user + ':' + password).toString('base64');
 }
 
 async function request(path, init = {}) {
   const headers = new Headers(init.headers || {});
-  if (init.auth !== false) headers.set('Authorization', auth());
+  if (init.auth !== false && !headers.has('Authorization')) headers.set('Authorization', auth());
   return worker.fetch(new Request('https://example.com' + path, {
     ...init,
     headers
@@ -114,6 +119,12 @@ async function request(path, init = {}) {
 let res = await request('/webdav/', { method: 'PROPFIND', auth: false });
 assert.equal(res.status, 401);
 assert.equal(res.headers.get('WWW-Authenticate')?.includes('Basic'), true);
+
+res = await request('/webdav/', {
+  method: 'PROPFIND',
+  headers: { Authorization: basic('wrong', 'secret') }
+});
+assert.equal(res.status, 401);
 
 res = await request('/webdav/docs', { method: 'MKCOL' });
 assert.equal(res.status, 201);
