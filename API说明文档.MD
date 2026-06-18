@@ -23,6 +23,7 @@
 - [13. 文件信息与分片下载 API](#13-文件信息与分片下载-api)
 - [14. 错误码参考](#14-错误码参考)
 - [15. 备份目录同步 API](#15-备份目录同步-api)
+- [16. WebDAV API](#16-webdav-api)
 
 ---
 
@@ -1736,6 +1737,54 @@ DELETE /api/backup-dirs?clientId=my-device-001&path=music
   │                                   │                                   │
   │                                   │              设备B 同步到本地目录  │
 ```
+
+---
+
+## 16. WebDAV API
+
+WebDAV 入口：
+
+```text
+https://your-worker.workers.dev/webdav/
+```
+
+### 鉴权方式
+
+- 设置了 `ACCESS_PASSWORD` 时使用 Basic Auth。
+- 用户名可任意填写，密码填写 `ACCESS_PASSWORD`。
+- 未设置 `ACCESS_PASSWORD` 时公开访问。
+
+### 支持的方法
+
+| 方法 | 说明 |
+| ---- | ---- |
+| `OPTIONS` | 返回 WebDAV 能力和允许的方法 |
+| `PROPFIND` | 列出目录或查询文件属性，支持 `Depth: 0` / `Depth: 1` |
+| `GET` / `HEAD` | 下载文件，复用现有 Range 下载能力 |
+| `PUT` | 上传或覆盖文件，写入现有虚拟路径映射 |
+| `MKCOL` | 创建文件夹 |
+| `DELETE` | 删除文件或文件夹 |
+| `MOVE` | 移动/重命名文件或文件夹 |
+| `COPY` | 复制文件或文件夹 |
+| `LOCK` / `UNLOCK` | 兼容常见客户端的轻量锁响应 |
+
+### 示例
+
+```http
+PROPFIND /webdav/docs/
+Depth: 1
+Authorization: Basic base64(user:ACCESS_PASSWORD)
+```
+
+```http
+PUT /webdav/docs/readme.txt
+Content-Type: text/plain
+Authorization: Basic base64(user:ACCESS_PASSWORD)
+
+hello
+```
+
+> WebDAV `PUT` 是单请求上传，受 Cloudflare Worker 单请求体限制和 `MAX_UPLOAD_SIZE_MB` 限制。超大文件建议继续使用网页端分片/分布式上传。
 
 ---
 

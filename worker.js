@@ -142,6 +142,15 @@ function escapeHtml(value = '') {
   return escapeAttr(value);
 }
 
+function escapeXml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function jsString(value = '') {
   return JSON.stringify(String(value ?? ''));
 }
@@ -3410,6 +3419,16 @@ function getCookie(request, name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function decodeBase64(value = '') {
+  try {
+    if (typeof atob === 'function') return atob(value);
+  } catch {}
+  try {
+    if (typeof Buffer !== 'undefined') return Buffer.from(value, 'base64').toString('utf8');
+  } catch {}
+  return '';
+}
+
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -5131,6 +5150,247 @@ async function storedVirtualFileResponse(request, R2, path, env, options = {}) {
   });
 }
 
+function webDavHeaders(extra = {}) {
+  return {
+    'DAV': '1, 2',
+    'MS-Author-Via': 'DAV',
+    'Allow': 'OPTIONS, PROPFIND, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK',
+    ...extra
+  };
+}
+
+function webDavUnauthorizedResponse() {
+  return new Response('Unauthorized', {
+    status: 401,
+    headers: webDavHeaders({
+      'WWW-Authenticate': 'Basic realm="R2 Cloud Drive WebDAV"',
+      'Content-Type': 'text/plain;charset=UTF-8'
+    })
+  });
+}
+
+function isWebDavAuthorized(request, env) {
+  if (!env.ACCESS_PASSWORD) return true;
+  const header = request.headers.get('Authorization') || '';
+  const match = header.match(/^Basic\s+(.+)$/i);
+  if (!match) return false;
+  const decoded = decodeBase64(match[1]);
+  const password = decoded.includes(':') ? decoded.slice(decoded.indexOf(':') + 1) : decoded;
+  return password === env.ACCESS_PASSWORD;
+}
+
+function webDavPathFromUrl(url) {
+  let raw = url.pathname.replace(/^\/webdav\/?/, '');
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {}
+  return assertVirtualPath(raw, { allowRoot: true });
+}
+
+function webDavHref(path = '', isFolder = false) {
+  const clean = normalizeVirtualPath(path);
+  const encoded = clean
+    ? clean.split('/').map(part => encodeURIComponent(part)).join('/') + (isFolder ? '/' : '')
+    : '';
+  return '/webdav/' + encoded;
+}
+
+function webDavHttpDate(value) {
+  const date = value ? new Date(value) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date().toUTCString() : date.toUTCString();
+}
+
+function webDavPropResponse({ href, isFolder, size = 0, contentType = '', uploaded = '', etag = '' }) {
+  const status = 'HTTP/1.1 200 OK';
+  const displayName = href.replace(/\/$/, '').split('/').filter(Boolean).pop() || '';
+  const resourceType = isFolder ? '<D:collection/>' : '';
+  const contentLength = isFolder ? '' : `<D:getcontentlength>${Math.max(0, Number(size) || 0)}</D:getcontentlength>`;
+  const contentTypeTag = isFolder ? '' : `<D:getcontenttype>${escapeXml(contentType || 'application/octet-stream')}</D:getcontenttype>`;
+  const etagTag = etag ? `<D:getetag>${escapeXml(etag)}</D:getetag>` : '';
+  return `<D:response>
+    <D:href>${escapeXml(href)}</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>${escapeXml(decodeURIComponent(displayName))}</D:displayname>
+        <D:resourcetype>${resourceType}</D:resourcetype>
+        ${contentLength}
+        ${contentTypeTag}
+        <D:getlastmodified>${escapeXml(webDavHttpDate(uploaded))}</D:getlastmodified>
+        ${etagTag}
+      </D:prop>
+      <D:status>${status}</D:status>
+    </D:propstat>
+  </D:response>`;
+}
+
+async function webDavPropfindResponse(request, env, path) {
+  const depth = (request.headers.get('Depth') || 'infinity').toLowerCase();
+  if (depth !== '0' && depth !== '1' && depth !== 'infinity') {
+    return new Response('Invalid Depth', { status: 400, headers: webDavHeaders() });
+  }
+
+  const file = path ? await getFileEntry(env, path) : null;
+  const folder = file ? null : await getFolderEntry(env, path);
+  if (!file && !folder) return new Response('Not Found', { status: 404, headers: webDavHeaders() });
+
+  const responses = [];
+  if (file) {
+    responses.push(webDavPropResponse({
+      href: webDavHref(path, false),
+      isFolder: false,
+      size: file.size,
+      contentType: file.contentType || getMimeType(path),
+      uploaded: file.uploaded,
+      etag: file.etag
+    }));
+  } else {
+    responses.push(webDavPropResponse({
+      href: webDavHref(path, true),
+      isFolder: true,
+      uploaded: folder.updatedAt || folder.createdAt
+    }));
+
+    if (depth !== '0') {
+      const { folders, files } = await listDirectory(env, path);
+      for (const name of folders) {
+        const childPath = joinVirtualPath(path, name);
+        const child = await getFolderEntry(env, childPath);
+        responses.push(webDavPropResponse({
+          href: webDavHref(childPath, true),
+          isFolder: true,
+          uploaded: child?.updatedAt || child?.createdAt
+        }));
+      }
+      for (const item of files) {
+        const childPath = joinVirtualPath(path, item.name);
+        const entry = await getFileEntry(env, childPath);
+        responses.push(webDavPropResponse({
+          href: webDavHref(childPath, false),
+          isFolder: false,
+          size: entry?.size ?? item.size,
+          contentType: entry?.contentType || getMimeType(childPath),
+          uploaded: entry?.uploaded || item.uploaded,
+          etag: entry?.etag || item.etag
+        }));
+      }
+    }
+  }
+
+  const body = `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+${responses.join('\n')}
+</D:multistatus>`;
+  return new Response(body, {
+    status: 207,
+    headers: webDavHeaders({ 'Content-Type': 'application/xml; charset=utf-8' })
+  });
+}
+
+function destinationPathFromHeader(request) {
+  const destination = request.headers.get('Destination') || '';
+  if (!destination) throw new Error('Missing Destination');
+  const url = new URL(destination, request.url);
+  if (!url.pathname.startsWith('/webdav')) throw new Error('Destination must be under /webdav');
+  return webDavPathFromUrl(url);
+}
+
+async function handleWebDavRequest(request, env, ctx, uploadConfig) {
+  if (!isWebDavAuthorized(request, env)) return webDavUnauthorizedResponse();
+
+  const url = new URL(request.url);
+  const path = webDavPathFromUrl(url);
+  const R2 = env.R2_BUCKET;
+  const method = request.method.toUpperCase();
+
+  if (method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: webDavHeaders({ 'Content-Length': '0' }) });
+  }
+
+  if (method === 'PROPFIND') return webDavPropfindResponse(request, env, path);
+
+  if (method === 'GET' || method === 'HEAD') {
+    if (!path) return webDavPropfindResponse(request, env, path);
+    return storedVirtualFileResponse(request, R2, path, env, {
+      filename: virtualPathName(path),
+      contentType: getMimeType(path),
+      baseHeaders: webDavHeaders()
+    });
+  }
+
+  if (method === 'PUT') {
+    if (!path) return new Response('Cannot PUT collection root', { status: 405, headers: webDavHeaders() });
+    const directSize = contentLengthOf(request);
+    const tooLarge = uploadTooLargeResponse(uploadConfig, directSize);
+    if (tooLarge) return tooLarge;
+    const cleanPath = assertVirtualPath(path);
+    const existed = !!await getFileEntry(env, cleanPath);
+    const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'webdav');
+    const mime = request.headers.get('Content-Type') || getMimeType(cleanPath);
+    const object = await R2.put(storageKey, request.body, { httpMetadata: { contentType: mime } });
+    const storedTooLarge = uploadTooLargeResponse(uploadConfig, Number(object?.size || 0));
+    if (storedTooLarge) {
+      await R2.delete(storageKey);
+      return storedTooLarge;
+    }
+    await replaceFileEntry(env, R2, fileEntryFromR2Meta(cleanPath, storageKey, object, {
+      contentType: mime,
+      storageType: 'r2'
+    }));
+    return new Response(null, { status: existed ? 204 : 201, headers: webDavHeaders({ 'ETag': object?.etag || '' }) });
+  }
+
+  if (method === 'MKCOL') {
+    if (!path) return new Response('Root already exists', { status: 405, headers: webDavHeaders() });
+    if (await getFileEntry(env, path) || await getFolderEntry(env, path)) {
+      return new Response('Already exists', { status: 405, headers: webDavHeaders() });
+    }
+    await putFolderEntry(env, path);
+    return new Response(null, { status: 201, headers: webDavHeaders() });
+  }
+
+  if (method === 'DELETE') {
+    if (!path) return new Response('Cannot delete root', { status: 403, headers: webDavHeaders() });
+    await deleteVirtualPath(env, R2, path, ctx);
+    return new Response(null, { status: 204, headers: webDavHeaders() });
+  }
+
+  if (method === 'MOVE' || method === 'COPY') {
+    if (!path) return new Response('Cannot move or copy root', { status: 403, headers: webDavHeaders() });
+    const destination = destinationPathFromHeader(request);
+    if (!destination) return new Response('Invalid Destination', { status: 400, headers: webDavHeaders() });
+    const exists = !!(await getFileEntry(env, destination) || await getFolderEntry(env, destination));
+    if (exists && (request.headers.get('Overwrite') || 'T').toUpperCase() === 'F') {
+      return new Response('Destination exists', { status: 412, headers: webDavHeaders() });
+    }
+    if (method === 'MOVE') await moveVirtualPath(env, R2, path, destination);
+    else await copyVirtualPath(env, R2, path, destination);
+    return new Response(null, { status: exists ? 204 : 201, headers: webDavHeaders() });
+  }
+
+  if (method === 'LOCK') {
+    const token = 'opaquelocktoken:' + crypto.randomUUID();
+    const body = `<?xml version="1.0" encoding="utf-8"?>
+<D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock>
+<D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope>
+<D:depth>infinity</D:depth><D:timeout>Second-3600</D:timeout>
+<D:locktoken><D:href>${escapeXml(token)}</D:href></D:locktoken>
+</D:activelock></D:lockdiscovery></D:prop>`;
+    return new Response(body, {
+      status: 200,
+      headers: webDavHeaders({
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Lock-Token': `<${token}>`
+      })
+    });
+  }
+
+  if (method === 'UNLOCK') {
+    return new Response(null, { status: 204, headers: webDavHeaders() });
+  }
+
+  return new Response('Method Not Allowed', { status: 405, headers: webDavHeaders() });
+}
+
 async function resolveManifestParts(manifest, env) {
   const nodes = await getStorageNodes(env, true);
   const nodeMap = new Map(nodes.map(node => [node.id, node]));
@@ -5458,6 +5718,10 @@ export default {
 
     if (!hasMetadataStore(env)) {
       return new Response('未配置 D1 数据库。文件路径映射需要绑定 DB。', { status: 500 });
+    }
+
+    if (path === '/webdav' || path.startsWith('/webdav/')) {
+      return handleWebDavRequest(request, env, ctx, uploadConfig);
     }
 
         // ── Auth endpoints ──

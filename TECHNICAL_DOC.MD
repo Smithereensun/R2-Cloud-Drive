@@ -53,7 +53,7 @@ database_id = "your-database-id"
 | `UPLOAD_SPEED_LIMIT_MBPS` | 浏览器端平均上传限速，单位 MiB/s，0 或不设置表示不限制 |
 | `UPLOAD_API_CONCURRENCY` | 上传接口并发数，控制直传/分片请求并发，范围 1~16，默认 3 |
 
-当前版本不支持 WebDAV。路由层没有处理 `PROPFIND`、`MKCOL`、`MOVE`、`COPY`、`LOCK` 等 WebDAV 方法；如果需要 WebDAV，需要新增一套协议适配层，把 WebDAV 路径操作映射到现有虚拟文件系统和 R2/D1 元数据模型。
+WebDAV 入口为 `/webdav/`。路由层支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、`LOCK`、`UNLOCK`，并通过现有虚拟文件系统函数映射到 D1/R2：目录列表走 `listDirectory`，文件读走 `storedVirtualFileResponse`，写入走 `replaceFileEntry`，删除/移动/复制分别走 `deleteVirtualPath`、`moveVirtualPath`、`copyVirtualPath`。WebDAV 使用 Basic Auth 复用 `ACCESS_PASSWORD`；未设置密码时公开访问。
 
 ## 3. 代码分层速览
 
