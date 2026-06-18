@@ -45,6 +45,7 @@ database_id = "your-database-id"
 | --- | --- |
 | `ACCESS_PASSWORD` | 登录密码；不设置则公开访问管理端 |
 | `WEBDAV_USERNAME` | WebDAV Basic Auth 用户名；不设置则只校验密码，用户名可任意 |
+| `SHARED_FOLDER_DISABLED` | 是否禁用 `/shared` 公开共享文件夹，true/1/yes/on 表示禁用 |
 | `SITE_TITLE` | 站点标题 |
 | `CLOUD_ICON_URL` | 顶部/登录页图标 |
 | `LOGIN_BACKGROUND_URL` | 登录页背景图 |
@@ -55,6 +56,8 @@ database_id = "your-database-id"
 | `UPLOAD_API_CONCURRENCY` | 上传接口并发数，控制直传/分片请求并发，范围 1~16，默认 3 |
 
 WebDAV 入口为 `/webdav/`。路由层支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、`LOCK`、`UNLOCK`，并通过现有虚拟文件系统函数映射到 D1/R2：目录列表走 `listDirectory`，文件读走 `storedVirtualFileResponse`，写入走 `replaceFileEntry`，删除/移动/复制分别走 `deleteVirtualPath`、`moveVirtualPath`、`copyVirtualPath`。WebDAV 使用 Basic Auth 复用 `ACCESS_PASSWORD`；设置 `WEBDAV_USERNAME` 后会同时校验用户名；未设置密码时公开访问。
+
+文件分享链接使用 D1 KV key `share_link:<token>` 存储，包含虚拟路径、密码哈希、过期时间和创建时间。公开入口 `/share/<token>` 会校验过期时间和可选密码后复用 `storedVirtualFileResponse` 下载文件。`SHARED_FOLDER_DISABLED` 只关闭 `/shared` 和 shared 目录公开下载，不影响 `/share/<token>`。
 
 ## 3. 代码分层速览
 

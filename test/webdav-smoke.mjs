@@ -149,6 +149,63 @@ res = await request('/webdav/docs/hello.txt', { method: 'GET' });
 assert.equal(res.status, 200);
 assert.equal(await res.text(), 'hello webdav');
 
+res = await worker.fetch(new Request('https://example.com/api/share-links', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Cookie': 'r2drive_session=' + encodeURIComponent(Buffer.from(JSON.stringify({ t: Date.now(), s: 'test' })).toString('base64'))
+  },
+  body: JSON.stringify({
+    path: 'docs/hello.txt',
+    password: 'sharepass',
+    expiresInSeconds: 60
+  })
+}), env, ctx);
+assert.equal(res.status, 200);
+const shareData = await res.json();
+assert.equal(shareData.ok, true);
+assert.equal(shareData.share.hasPassword, true);
+
+const sharePath = new URL(shareData.share.url).pathname;
+res = await worker.fetch(new Request('https://example.com' + sharePath, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ password: 'wrong' })
+}), env, ctx);
+assert.equal(res.status, 403);
+
+res = await worker.fetch(new Request('https://example.com' + sharePath, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ password: 'sharepass' })
+}), env, ctx);
+assert.equal(res.status, 200);
+assert.equal(await res.text(), 'hello webdav');
+
+const disabledEnv = { ...env, SHARED_FOLDER_DISABLED: 'true' };
+res = await worker.fetch(new Request('https://example.com/shared'), disabledEnv, ctx);
+assert.equal(res.status, 404);
+
+res = await worker.fetch(new Request('https://example.com/api/shared-list'), disabledEnv, ctx);
+assert.equal(res.status, 404);
+
+res = await worker.fetch(new Request('https://example.com/api/share-links', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Cookie': 'r2drive_session=' + encodeURIComponent(Buffer.from(JSON.stringify({ t: Date.now(), s: 'test' })).toString('base64'))
+  },
+  body: JSON.stringify({
+    path: 'docs/hello.txt',
+    expiresInSeconds: 0
+  })
+}), disabledEnv, ctx);
+assert.equal(res.status, 200);
+const noPasswordShare = await res.json();
+res = await worker.fetch(new Request(new URL(noPasswordShare.share.url).toString()), disabledEnv, ctx);
+assert.equal(res.status, 200);
+assert.equal(await res.text(), 'hello webdav');
+
 res = await request('/webdav/docs/hello.txt', {
   method: 'COPY',
   headers: { Destination: 'https://example.com/webdav/docs/copy.txt' }

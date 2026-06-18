@@ -24,6 +24,7 @@
 - [14. 错误码参考](#14-错误码参考)
 - [15. 备份目录同步 API](#15-备份目录同步-api)
 - [16. WebDAV API](#16-webdav-api)
+- [17. 文件分享 API](#17-文件分享-api)
 
 ---
 
@@ -1110,6 +1111,8 @@ GET /api/storage
 
 ## 9. 共享文件夹 API（公开）
 
+> 如设置 `SHARED_FOLDER_DISABLED=true`，`/shared` 页面、`/api/shared-list` 和 `/api/download?path=shared/...` 公开访问会被禁用。
+
 > 共享文件夹路径：`shared/`。所有 API 无需登录。
 
 ### 9.1 列出共享目录
@@ -1786,6 +1789,76 @@ hello
 ```
 
 > WebDAV `PUT` 是单请求上传，受 Cloudflare Worker 单请求体限制和 `MAX_UPLOAD_SIZE_MB` 限制。超大文件建议继续使用网页端分片/分布式上传。
+
+---
+
+## 17. 文件分享 API
+
+文件分享是独立的单文件公开链接，不依赖 `/shared` 目录。管理员创建后返回 `/share/<token>`，可选密码和有效期。
+
+### 17.1 创建分享链接
+
+```http
+POST /api/share-links
+Content-Type: application/json
+```
+
+需要登录认证。
+
+```json
+{
+  "path": "docs/readme.txt",
+  "password": "123456",
+  "expiresInSeconds": 604800
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `path` | string | 是 | 要分享的文件虚拟路径 |
+| `password` | string | 否 | 分享访问密码，留空则无需密码 |
+| `expiresInSeconds` | number | 否 | 有效期秒数，`0` 或省略表示永久有效 |
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "share": {
+    "token": "abc...",
+    "url": "https://your-worker.workers.dev/share/abc...",
+    "path": "docs/readme.txt",
+    "name": "readme.txt",
+    "hasPassword": true,
+    "expiresAt": 1790000000000,
+    "createdAt": "2026-06-19T00:00:00.000Z"
+  }
+}
+```
+
+### 17.2 访问分享链接
+
+```http
+GET /share/<token>
+```
+
+无密码分享会直接下载文件。带密码分享会返回密码输入页；也可以用接口方式提交密码：
+
+```http
+POST /share/<token>
+Content-Type: application/json
+
+{"password":"123456"}
+```
+
+### 17.3 查询或删除分享链接
+
+```http
+GET /api/share-links?token=<token>
+DELETE /api/share-links?token=<token>
+```
+
+需要登录认证。
 
 ---
 

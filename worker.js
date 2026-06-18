@@ -23,6 +23,7 @@
  *    在 Worker 环境变量中设置:
  *    ACCESS_PASSWORD = "your-password"
  *    WEBDAV_USERNAME = "your-webdav-user"  // 可选，仅限制 WebDAV Basic Auth 用户名
+ *    SHARED_FOLDER_DISABLED = "true"       // 可选，禁用 /shared 公开共享文件夹
  *
  * 4. 站点标题 (可选)
  *    SITE_TITLE = "My Cloud Drive"
@@ -1091,6 +1092,9 @@ ${content}
   <div class="context-menu-item" onclick="ctxCopyLink()">
     <span class="material-icons-round">link</span><span>复制链接</span>
   </div>
+  <div class="context-menu-item" onclick="ctxShareFile()">
+    <span class="material-icons-round">ios_share</span><span>创建分享</span>
+  </div>
   <div class="context-menu-divider"></div>
   <div class="context-menu-item danger" onclick="ctxDelete()">
     <span class="material-icons-round">delete_outline</span><span>删除</span>
@@ -1680,6 +1684,58 @@ function downloadSelected() {
       const path = currentPath ? currentPath + '/' + name : name;
       startDownload(path, getFileSizeByName(name));
     });
+  }
+}
+
+let shareTargetPath = '';
+let shareTargetName = '';
+
+function openShareModal(path, name) {
+  shareTargetPath = path;
+  shareTargetName = name;
+  const nameInput = document.getElementById('shareFileNameInput');
+  const passwordInput = document.getElementById('sharePasswordInput');
+  const expireInput = document.getElementById('shareExpireInput');
+  if (nameInput) nameInput.value = name;
+  if (passwordInput) passwordInput.value = '';
+  if (expireInput) expireInput.value = '0';
+  document.getElementById('shareModal')?.classList.add('open');
+}
+
+function closeShareModal() {
+  document.getElementById('shareModal')?.classList.remove('open');
+}
+
+function shareSelected() {
+  if (selectedFiles.size !== 1) { showSnackbar('请只选择一个文件进行分享'); return; }
+  const name = [...selectedFiles][0];
+  const path = currentPath ? currentPath + '/' + name : name;
+  openShareModal(path, name);
+}
+
+function ctxShareFile() {
+  if (!ctxTarget) return;
+  const path = currentPath ? currentPath + '/' + ctxTarget : ctxTarget;
+  openShareModal(path, ctxTarget);
+}
+
+async function createShareLink() {
+  if (!shareTargetPath) return;
+  const password = document.getElementById('sharePasswordInput')?.value || '';
+  const expiresInSeconds = Number(document.getElementById('shareExpireInput')?.value || 0) || 0;
+  try {
+    const res = await fetch('/api/share-links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: shareTargetPath, password, expiresInSeconds })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.share?.url) throw new Error(data.error || 'create share failed');
+    await navigator.clipboard.writeText(data.share.url);
+    closeShareModal();
+    showSnackbar('分享链接已创建并复制');
+  } catch (err) {
+    showSnackbar('创建分享失败：' + (err.message || '未知错误'));
   }
 }
 
@@ -3173,6 +3229,9 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <button class="action-btn" onclick="downloadSelected()" title="下载">
         <span class="material-icons-round">download</span><span>下载</span>
       </button>
+      <button class="action-btn" onclick="shareSelected()" title="分享">
+        <span class="material-icons-round">ios_share</span><span>分享</span>
+      </button>
       <button class="action-btn danger" onclick="deleteSelected()" title="删除">
         <span class="material-icons-round">delete_outline</span><span>删除</span>
       </button>
@@ -3259,6 +3318,36 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       <button class="btn-outlined" onclick="closeUpload()">关闭</button>
       <button class="fab" style="box-shadow:none" onclick="document.getElementById('fileInput').click()">
         <span class="material-icons-round">folder_open</span> 选择文件
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Share File Modal -->
+<div class="modal-overlay" id="shareModal" onclick="if(event.target===this)closeShareModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="material-icons-round" style="color:var(--primary)">ios_share</span>
+      <span class="modal-title">创建文件分享</span>
+    </div>
+    <div class="modal-body">
+      <label class="field-label" for="shareFileNameInput">文件</label>
+      <input class="text-field" id="shareFileNameInput" type="text" readonly>
+      <label class="field-label" for="sharePasswordInput" style="margin-top:12px">访问密码（可选）</label>
+      <input class="text-field" id="sharePasswordInput" type="text" placeholder="留空则无需密码">
+      <label class="field-label" for="shareExpireInput" style="margin-top:12px">有效期</label>
+      <select class="text-field" id="shareExpireInput">
+        <option value="0">永久有效</option>
+        <option value="3600">1 小时</option>
+        <option value="86400">1 天</option>
+        <option value="604800">7 天</option>
+        <option value="2592000">30 天</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outlined" onclick="closeShareModal()">取消</button>
+      <button class="fab" style="box-shadow:none" onclick="createShareLink()">
+        <span class="material-icons-round">content_copy</span> 创建并复制
       </button>
     </div>
   </div>
@@ -3383,6 +3472,7 @@ const FS_FOLDER_PREFIX = 'r2drive:fs:folder:';
 const FS_DIR_PREFIX = 'r2drive:fs:dir:';
 const NODE_PART_PREFIX = 'r2drive_node_part_';
 const STORAGE_NODE_USAGE_PREFIX = 'storage_node_usage:';
+const SHARE_LINK_PREFIX = 'share_link:';
 const MANIFEST_CONTENT_TYPE = 'application/vnd.r2drive.manifest+json';
 const MANIFEST_VERSION = 1;
 const DOWNLOAD_RANGE_SIZE_BYTES = 32 * 1024 * 1024;
@@ -3464,6 +3554,14 @@ function getDownloadRangeSize(env) {
 function readPositiveNumber(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function envFlag(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function isSharedFolderDisabled(env) {
+  return envFlag(env.SHARED_FOLDER_DISABLED);
 }
 
 function getUploadConfig(env) {
@@ -5151,6 +5249,134 @@ async function storedVirtualFileResponse(request, R2, path, env, options = {}) {
   });
 }
 
+function shareLinkKey(token = '') {
+  return SHARE_LINK_PREFIX + String(token || '').trim();
+}
+
+function generateShareToken() {
+  return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+}
+
+async function sha256Hex(value = '') {
+  const bytes = new TextEncoder().encode(String(value));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function isShareExpired(share) {
+  const expiresAt = Number(share?.expiresAt || 0);
+  return expiresAt > 0 && Date.now() > expiresAt;
+}
+
+function publicShareInfo(share, request) {
+  const token = String(share.token || '');
+  return {
+    token,
+    url: new URL('/share/' + encodeURIComponent(token), request.url).toString(),
+    path: share.path,
+    name: virtualPathName(share.path),
+    hasPassword: !!share.passwordHash,
+    expiresAt: share.expiresAt || 0,
+    createdAt: share.createdAt || ''
+  };
+}
+
+async function getShareLink(env, token) {
+  const cleanToken = String(token || '').trim();
+  if (!cleanToken || !/^[a-zA-Z0-9_-]{16,128}$/.test(cleanToken)) return null;
+  const share = await kvGetJson(env, shareLinkKey(cleanToken));
+  if (!share?.token || !share?.path) return null;
+  if (isShareExpired(share)) {
+    await kvDelete(env, shareLinkKey(cleanToken)).catch(() => {});
+    return null;
+  }
+  return share;
+}
+
+async function verifySharePassword(share, password = '') {
+  if (!share?.passwordHash) return true;
+  if (!String(password || '')) return false;
+  return await sha256Hex(password) === share.passwordHash;
+}
+
+function renderSharePasswordPage(share, error = '', siteTitle = 'R2 云盘', cloudIconUrl = '') {
+  const name = virtualPathName(share.path);
+  const expiresText = share.expiresAt ? new Date(share.expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '永久有效';
+  return renderHTML(`
+<div class="login-wrap">
+  <button class="icon-btn login-theme-toggle" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
+    <span class="material-icons-round">dark_mode</span>
+  </button>
+  <div class="login-card">
+    <div class="login-logo">
+      ${renderLogoIcon(cloudIconUrl, 'link')}
+      <h1 class="login-title">文件分享</h1>
+      <p class="login-sub">${escapeHtml(name)} · ${escapeHtml(expiresText)}</p>
+    </div>
+    <label class="field-label" for="sharePwd">分享密码</label>
+    <input class="text-field" id="sharePwd" type="password" placeholder="请输入分享密码" autofocus
+      onkeydown="if(event.key==='Enter')submitSharePassword()">
+    <p class="login-error" id="shareError">${escapeHtml(error)}</p>
+    <button class="login-btn" onclick="submitSharePassword()">下载文件</button>
+  </div>
+</div>
+<script>
+function submitSharePassword() {
+  const pwd = document.getElementById('sharePwd').value;
+  fetch(location.pathname, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ password: pwd })
+  }).then(async r => {
+    if (r.ok) {
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = ${jsString(name)};
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    } else {
+      const data = await r.json().catch(() => ({}));
+      document.getElementById('shareError').textContent = data.error || '密码错误或分享已失效';
+    }
+  }).catch(() => {
+    document.getElementById('shareError').textContent = '下载失败，请稍后重试';
+  });
+}
+</script>
+`, siteTitle + ' - 文件分享');
+}
+
+async function handlePublicShareRequest(request, env, R2, siteTitle, cloudIconUrl) {
+  const url = new URL(request.url);
+  const token = decodeURIComponent(url.pathname.replace(/^\/share\/?/, '').split('/')[0] || '');
+  const share = await getShareLink(env, token);
+  if (!share) return new Response('Share not found or expired', { status: 404 });
+  const entry = await getFileEntry(env, share.path);
+  if (!entry) return new Response('File not found', { status: 404 });
+
+  let password = url.searchParams.get('password') || '';
+  if (request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    password = String(body.password || password || '');
+  }
+
+  if (!await verifySharePassword(share, password)) {
+    if (request.method === 'GET' && !password) {
+      return new Response(renderSharePasswordPage(share, '', siteTitle, cloudIconUrl), {
+        headers: { 'Content-Type': 'text/html;charset=UTF-8' }
+      });
+    }
+    return jsonResponse({ ok: false, error: '密码错误或分享已失效' }, 403);
+  }
+
+  return storedVirtualFileResponse(request, R2, share.path, env, {
+    filename: entry.name || virtualPathName(share.path),
+    contentType: entry.contentType || getMimeType(share.path)
+  });
+}
+
 function webDavHeaders(extra = {}) {
   return {
     'DAV': '1, 2',
@@ -5756,8 +5982,13 @@ export default {
       });
     }
 
+    if (path.startsWith('/share/')) {
+      return handlePublicShareRequest(request, env, R2, siteTitle, cloudIconUrl);
+    }
+
     // ── Shared Folder Route (public, no auth required) ──
     if (path === '/shared' || path === '/shared/') {
+      if (isSharedFolderDisabled(env)) return new Response('Shared folder is disabled', { status: 404 });
       const subPath = url.searchParams.get('path') || '';
       const sharedPath = joinVirtualPath(SHARED_PREFIX, subPath);
       const { folders, files } = await listDirectory(env, sharedPath);
@@ -5767,6 +5998,7 @@ export default {
 
     // ── Shared API: List (public) ──
     if (path === '/api/shared-list') {
+      if (isSharedFolderDisabled(env)) return jsonResponse({ ok: false, error: 'shared folder disabled' }, 404);
       const subPath = url.searchParams.get('path') || '';
       const sharedPath = joinVirtualPath(SHARED_PREFIX, subPath);
       const { folders, files } = await listDirectory(env, sharedPath);
@@ -5815,7 +6047,7 @@ export default {
         // Allow public download from shared folder
         if (path === '/api/download') {
           const filePath = url.searchParams.get('path') || '';
-          if (filePath.startsWith(SHARED_PREFIX + '/')) {
+          if (!isSharedFolderDisabled(env) && filePath.startsWith(SHARED_PREFIX + '/')) {
             return storedVirtualFileResponse(request, R2, filePath, env, {
               filename: virtualPathName(filePath),
               contentType: getMimeType(filePath)
@@ -5957,6 +6189,43 @@ export default {
 
     if (path === '/api/upload-config' && request.method === 'GET') {
       return jsonResponse(uploadConfig);
+    }
+
+    if (path === '/api/share-links' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const filePath = String(body.path || '').trim();
+      if (!filePath) return jsonResponse({ ok: false, error: 'missing path' }, 400);
+      const cleanPath = assertVirtualPath(filePath);
+      const entry = await getFileEntry(env, cleanPath);
+      if (!entry) return jsonResponse({ ok: false, error: 'file not found' }, 404);
+
+      const expiresInSeconds = Math.max(0, Number(body.expiresInSeconds || 0) || 0);
+      const expiresAt = expiresInSeconds > 0 ? Date.now() + expiresInSeconds * 1000 : 0;
+      const password = String(body.password || '');
+      const token = generateShareToken();
+      const share = {
+        token,
+        path: cleanPath,
+        passwordHash: password ? await sha256Hex(password) : '',
+        expiresAt,
+        createdAt: new Date().toISOString()
+      };
+      await kvPutJson(env, shareLinkKey(token), share, expiresAt ? { expirationTtl: expiresInSeconds + 86400 } : undefined);
+      return jsonResponse({ ok: true, share: publicShareInfo(share, request) });
+    }
+
+    if (path === '/api/share-links' && request.method === 'GET') {
+      const token = url.searchParams.get('token') || '';
+      const share = await getShareLink(env, token);
+      if (!share) return jsonResponse({ ok: false, error: 'not found' }, 404);
+      return jsonResponse({ ok: true, share: publicShareInfo(share, request) });
+    }
+
+    if (path === '/api/share-links' && request.method === 'DELETE') {
+      const token = url.searchParams.get('token') || '';
+      if (!token) return jsonResponse({ ok: false, error: 'missing token' }, 400);
+      await kvDelete(env, shareLinkKey(token));
+      return jsonResponse({ ok: true });
     }
 
         // Storage usage (for capacity display)
