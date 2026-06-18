@@ -388,6 +388,7 @@ Content-Type: application/json
 ```json
 {
   "path": "large/file.zip",
+  "size": 1073741824,
   "contentType": "application/zip"
 }
 ```
@@ -395,6 +396,7 @@ Content-Type: application/json
 | 字段            | 类型   | 必填 | 说明                          |
 | --------------- | ------ | ---- | ----------------------------- |
 | `path`        | string | 是   | 目标虚拟路径                  |
+| `size`        | number | 是   | 文件总大小（字节），用于上传大小限制校验 |
 | `contentType` | string | 否   | MIME 类型，省略则从文件名推断 |
 
 **成功响应（200）：**
@@ -1555,6 +1557,7 @@ GET /api/download-part?path=videos/movie.mp4&partIndex=0
 | 401    | 未授权                 | Cookie 过期或无效；节点 token 错误 |
 | 404    | 未找到                 | 文件/文件夹不存在；session 已过期  |
 | 409    | 冲突                   | 文件大小未达到分布式上传阈值       |
+| 413    | 请求体过大             | 超过 `MAX_UPLOAD_SIZE_MB` 或单分片超过 90 MiB |
 | 416    | Range 不满足           | 请求的字节范围超出文件大小         |
 | 500    | 服务器内部错误         | 配置缺失、R2/D1 操作失败           |
 | 502    | 网关错误               | 外部节点无法连接                   |

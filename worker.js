@@ -35,6 +35,11 @@
  * 7. 存储节点密钥 (可选 - 节点 Worker 接收分片时使用)
  *    STORAGE_NODE_TOKEN = "your-node-token"
  *
+ * 8. 上传限制 (可选)
+ *    MAX_UPLOAD_SIZE_MB = "10240"        单文件最大上传大小，0 或不设置表示不限制
+ *    UPLOAD_SPEED_LIMIT_MBPS = "20"      单浏览器上传平均限速，0 或不设置表示不限制
+ *    UPLOAD_API_CONCURRENCY = "3"        上传分片/直传请求并发数，范围 1-16
+ *
  * ============================================
  * 功能列表
  * ============================================
@@ -153,7 +158,12 @@ function renderLogoIcon(iconUrl = '', fallbackIcon = 'cloud') {
   return `<div class="logo-icon"><span class="material-icons-round">${fallbackIcon}</span></div>`;
 }
 
-function renderHTML(content, title = 'R2 云盘') {
+function renderHTML(content, title = 'R2 云盘', options = {}) {
+  const uploadConfig = {
+    maxUploadSizeBytes: Math.max(0, Number(options.uploadConfig?.maxUploadSizeBytes || 0)),
+    uploadSpeedLimitBytesPerSecond: Math.max(0, Number(options.uploadConfig?.uploadSpeedLimitBytesPerSecond || 0)),
+    uploadApiConcurrency: Math.min(16, Math.max(1, parseInt(options.uploadConfig?.uploadApiConcurrency || '3', 10) || 3))
+  };
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -990,6 +1000,7 @@ function renderHTML(content, title = 'R2 云盘') {
     pointer-events: auto;
     transform: translateX(-50%) translateY(0);
     transition-delay: 0s; /* show instantly */
+  }
   .version-tooltip-title {
     font-size: 14px; font-weight: 600; color: var(--on-surface); margin-bottom: 6px;
   }
@@ -1077,6 +1088,7 @@ ${content}
 </div>
 
 <script>
+window.R2_UPLOAD_CONFIG = ${JSON.stringify(uploadConfig)};
 // ── State ──
 let viewMode = localStorage.getItem('viewMode') || 'grid';
 let selectedFiles = new Set();
@@ -1992,10 +2004,75 @@ function handleDragOver(e) { e.preventDefault(); document.querySelector('.upload
 function handleDragLeave() { document.querySelector('.upload-zone')?.classList.remove('drag-over'); }
 function handleFileInput(e) { uploadFiles(e.target.files); }
 
+const UPLOAD_CONFIG = Object.assign({
+  maxUploadSizeBytes: 0,
+  uploadSpeedLimitBytesPerSecond: 0,
+  uploadApiConcurrency: 3
+}, window.R2_UPLOAD_CONFIG || {});
+UPLOAD_CONFIG.maxUploadSizeBytes = Math.max(0, Number(UPLOAD_CONFIG.maxUploadSizeBytes || 0));
+UPLOAD_CONFIG.uploadSpeedLimitBytesPerSecond = Math.max(0, Number(UPLOAD_CONFIG.uploadSpeedLimitBytesPerSecond || 0));
+UPLOAD_CONFIG.uploadApiConcurrency = Math.min(16, Math.max(1, parseInt(UPLOAD_CONFIG.uploadApiConcurrency || '3', 10) || 3));
+
 const DIRECT_UPLOAD_LIMIT = 512 * 1024; // 512 KB - 小于此大小的文件直传主 R2，大于则走分布式存储
 const MULTIPART_DEFAULT_CHUNK = 32 * 1024 * 1024;
 const MULTIPART_MAX_CHUNK = 90 * 1024 * 1024;
 const MULTIPART_MAX_PARTS = 10000;
+let activeUploadRequests = 0;
+const pendingUploadRequests = [];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function uploadSizeLimitError(file) {
+  if (UPLOAD_CONFIG.maxUploadSizeBytes > 0 && file.size > UPLOAD_CONFIG.maxUploadSizeBytes) {
+    return '文件超过上传上限：' + formatSize(file.size) + ' / ' + formatSize(UPLOAD_CONFIG.maxUploadSizeBytes);
+  }
+  return '';
+}
+
+function pumpUploadQueue() {
+  while (activeUploadRequests < UPLOAD_CONFIG.uploadApiConcurrency && pendingUploadRequests.length) {
+    const item = pendingUploadRequests.shift();
+    activeUploadRequests++;
+    Promise.resolve()
+      .then(item.task)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        activeUploadRequests--;
+        pumpUploadQueue();
+      });
+  }
+}
+
+function scheduleUploadRequest(task) {
+  return new Promise((resolve, reject) => {
+    pendingUploadRequests.push({ task, resolve, reject });
+    pumpUploadQueue();
+  });
+}
+
+async function waitForUploadRate(bytes, startedAt) {
+  const limit = UPLOAD_CONFIG.uploadSpeedLimitBytesPerSecond;
+  if (!limit || bytes <= 0) return;
+  const minMs = bytes / limit * 1000;
+  const elapsed = performance.now() - startedAt;
+  if (minMs > elapsed) await sleep(minMs - elapsed);
+}
+
+async function runWithConcurrency(items, limit, mapper) {
+  const list = Array.from(items || []);
+  const results = new Array(list.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit || 1), list.length || 1) }, async () => {
+    while (next < list.length) {
+      const index = next++;
+      results[index] = await mapper(list[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function uploadFiles(files) {
   if (!files.length) return;
@@ -2013,6 +2090,12 @@ function uploadFiles(files) {
     if (list) list.append(item);
 
     const path = currentPath ? currentPath + '/' + file.name : file.name;
+    const sizeError = uploadSizeLimitError(file);
+    if (sizeError) {
+      fill.classList.add('error');
+      pctSpan.textContent = '✗';
+      return Promise.reject(new Error(sizeError));
+    }
     return uploadSingleFile(file, path, fill, pctSpan);
   });
 
@@ -2063,26 +2146,30 @@ async function fetchErrorMessage(res, fallback) {
 }
 
 function uploadDirect(file, path, fill, pctSpan) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload?path=' + encodeURIComponent(path));
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) {
-        const pct = Math.round(e.loaded / e.total * 100);
-        fill.style.width = pct + '%'; pctSpan.textContent = pct + '%';
-      }
-    };
-    xhr.onload = () => {
-      if (xhr.status === 200) {
-        fill.classList.add('done'); pctSpan.textContent = '✓'; resolve();
-      } else {
-        fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error(uploadErrorMessage(xhr)));
-      }
-    };
-    xhr.onerror = () => {
-      fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error('upload failed'));
-    };
-    xhr.send(file);
+  return scheduleUploadRequest(async () => {
+    const startedAt = performance.now();
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload?path=' + encodeURIComponent(path));
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          const pct = Math.round(e.loaded / e.total * 100);
+          fill.style.width = pct + '%'; pctSpan.textContent = pct + '%';
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          fill.classList.add('done'); pctSpan.textContent = '✓'; resolve();
+        } else {
+          fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error(uploadErrorMessage(xhr)));
+        }
+      };
+      xhr.onerror = () => {
+        fill.classList.add('error'); pctSpan.textContent = '✗'; reject(new Error('upload failed'));
+      };
+      xhr.send(file);
+    });
+    await waitForUploadRate(file.size, startedAt);
   });
 }
 
@@ -2102,24 +2189,33 @@ async function uploadMultipart(file, path, fill, pctSpan) {
     const initRes = await fetch('/api/multipart/init', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ path, contentType: file.type || '' })
+      body: JSON.stringify({ path, size: file.size, contentType: file.type || '' })
     });
     if (!initRes.ok) throw new Error(await fetchErrorMessage(initRes, 'multipart init failed'));
     const initData = await initRes.json();
     uploadId = initData.uploadId;
 
-    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+    const loadedByPart = new Map();
+    const updateProgress = () => {
+      const inFlight = [...loadedByPart.values()].reduce((sum, value) => sum + value, 0);
+      const pct = Math.min(99, Math.round((uploadedBytes + inFlight) / file.size * 100));
+      fill.style.width = pct + '%';
+      pctSpan.textContent = pct + '%';
+    };
+
+    await runWithConcurrency(Array.from({ length: totalParts }, (_, i) => i + 1), UPLOAD_CONFIG.uploadApiConcurrency, async partNumber => {
       const start = (partNumber - 1) * chunkSize;
       const end = Math.min(file.size, start + chunkSize);
       const chunk = file.slice(start, end);
       const part = await uploadMultipartPart(path, uploadId, partNumber, chunk, loaded => {
-        const pct = Math.min(99, Math.round((uploadedBytes + loaded) / file.size * 100));
-        fill.style.width = pct + '%';
-        pctSpan.textContent = pct + '%';
+        loadedByPart.set(partNumber, loaded);
+        updateProgress();
       });
+      loadedByPart.delete(partNumber);
       uploadedBytes += chunk.size;
-      parts.push(part);
-    }
+      parts[partNumber - 1] = part;
+      updateProgress();
+    });
 
     const completeRes = await fetch('/api/multipart/complete', {
       method: 'POST',
@@ -2145,28 +2241,33 @@ async function uploadMultipart(file, path, fill, pctSpan) {
 }
 
 function uploadMultipartPart(path, uploadId, partNumber, chunk, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const url = '/api/multipart/part?path=' + encodeURIComponent(path)
-      + '&uploadId=' + encodeURIComponent(uploadId)
-      + '&partNumber=' + partNumber;
-    xhr.open('POST', url);
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) onProgress(e.loaded);
-    };
-    xhr.onload = () => {
-      if (xhr.status !== 200) {
-        reject(new Error(uploadErrorMessage(xhr, 'multipart part failed')));
-        return;
-      }
-      try {
-        resolve(JSON.parse(xhr.responseText));
-      } catch (err) {
-        reject(err);
-      }
-    };
-    xhr.onerror = () => reject(new Error('multipart part failed'));
-    xhr.send(chunk);
+  return scheduleUploadRequest(async () => {
+    const startedAt = performance.now();
+    const part = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const url = '/api/multipart/part?path=' + encodeURIComponent(path)
+        + '&uploadId=' + encodeURIComponent(uploadId)
+        + '&partNumber=' + partNumber;
+      xhr.open('POST', url);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) onProgress(e.loaded);
+      };
+      xhr.onload = () => {
+        if (xhr.status !== 200) {
+          reject(new Error(uploadErrorMessage(xhr, 'multipart part failed')));
+          return;
+        }
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch (err) {
+          reject(err);
+        }
+      };
+      xhr.onerror = () => reject(new Error('multipart part failed'));
+      xhr.send(chunk);
+    });
+    await waitForUploadRate(chunk.size, startedAt);
+    return part;
   });
 }
 
@@ -2195,25 +2296,35 @@ async function uploadDistributed(file, path, fill, pctSpan) {
 
   // 打印分片分布情况到控制台，便于确认是否真正分布
   if (session.distribution && session.distribution.length > 0) {
-    const totalBytes = session.distribution.reduce((s, d) => s + d.bytes, 0);
+    const totalBytes = session.distribution.reduce((sum, d) => sum + d.bytes, 0);
     console.log('[分布式存储] 分片分布 (' + formatSize(totalBytes) + ')：',
       session.distribution.map(d => d.nodeName + ': ' + d.parts + ' 个分片, ' + formatSize(d.bytes)).join(' | '));
   }
 
   let uploadedBytes = 0;
   try {
-    for (let index = 0; index < totalParts; index++) {
+    const loadedByPart = new Map();
+    const updateProgress = () => {
+      const inFlight = [...loadedByPart.values()].reduce((sum, value) => sum + value, 0);
+      const pct = Math.min(99, Math.round((uploadedBytes + inFlight) / file.size * 100));
+      fill.style.width = pct + '%';
+      pctSpan.textContent = pct + '%';
+    };
+
+    await runWithConcurrency(Array.from({ length: totalParts }, (_, i) => i), UPLOAD_CONFIG.uploadApiConcurrency, async index => {
       const partInfo = session.parts[index];
       const start = index * chunkSize;
       const end = Math.min(file.size, start + chunkSize);
       const chunk = file.slice(start, end);
+      const partNumber = partInfo.partNumber || (index + 1);
       await uploadDistributedPart(partInfo, chunk, loaded => {
-        const pct = Math.min(99, Math.round((uploadedBytes + loaded) / file.size * 100));
-        fill.style.width = pct + '%';
-        pctSpan.textContent = pct + '%';
+        loadedByPart.set(partNumber, loaded);
+        updateProgress();
       });
+      loadedByPart.delete(partNumber);
       uploadedBytes += chunk.size;
-    }
+      updateProgress();
+    });
 
     const completeRes = await fetch('/api/distributed/complete', {
       method: 'POST',
@@ -2237,19 +2348,23 @@ async function uploadDistributed(file, path, fill, pctSpan) {
 }
 
 function uploadDistributedPart(partInfo, chunk, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', partInfo.uploadUrl);
-    if (partInfo.token) xhr.setRequestHeader('Authorization', 'Bearer ' + partInfo.token);
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) onProgress(e.loaded);
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 上传失败 (HTTP ' + xhr.status + ')：' + (xhr.responseText || '').slice(0, 120)));
-    };
-    xhr.onerror = () => reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 网络错误：' + partInfo.uploadUrl));
-    xhr.send(chunk);
+  return scheduleUploadRequest(async () => {
+    const startedAt = performance.now();
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', partInfo.uploadUrl);
+      if (partInfo.token) xhr.setRequestHeader('Authorization', 'Bearer ' + partInfo.token);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) onProgress(e.loaded);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 上传失败 (HTTP ' + xhr.status + ')：' + (xhr.responseText || '').slice(0, 120)));
+      };
+      xhr.onerror = () => reject(new Error('分片 ' + (partInfo.partNumber || '?') + ' 网络错误：' + partInfo.uploadUrl));
+      xhr.send(chunk);
+    });
+    await waitForUploadRate(chunk.size, startedAt);
   });
 }
 
@@ -2843,7 +2958,7 @@ function renderSharedPage(folders, files, currentPath, siteTitle, cloudIconUrl =
 `, siteTitle + ' - 共享');
 }
 
-function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = '') {
+function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = '', uploadConfig = {}) {
   const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : [];
 
   const breadcrumb = `<nav class="breadcrumb">
@@ -3238,7 +3353,7 @@ function renderDrivePage(folders, files, currentPath, siteTitle, cloudIconUrl = 
       </button>
     </div>
   </div>
-</div>`, siteTitle);
+</div>`, siteTitle, { uploadConfig });
 }
 
 // ── Session (Cookie-based) ──
@@ -3265,6 +3380,12 @@ const DOWNLOAD_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const DOWNLOAD_NODE_FETCH_RETRIES = 3;
 const DISTRIBUTED_UPLOAD_THRESHOLD_BYTES = 512 * 1024; // 512 KB - 超过此大小的文件使用分布式存储
 const BACKUP_DIRS_PREFIX = 'backup_dirs:'; // 备份目录同步 - 跨设备保留同步目录
+const DIRECT_UPLOAD_LIMIT_BYTES = 512 * 1024;
+const MULTIPART_MIN_CHUNK_BYTES = 5 * 1024 * 1024;
+const MULTIPART_MAX_CHUNK_BYTES = 90 * 1024 * 1024;
+const MULTIPART_MAX_PARTS = 10000;
+const UPLOAD_API_CONCURRENCY_DEFAULT = 3;
+const UPLOAD_API_CONCURRENCY_MAX = 16;
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -3318,6 +3439,62 @@ function getDownloadRangeSize(env) {
   const configuredMb = Number(env.DOWNLOAD_RANGE_SIZE_MB || 0);
   const configured = configuredMb > 0 ? configuredMb * 1024 * 1024 : DOWNLOAD_RANGE_SIZE_BYTES;
   return Math.min(32 * 1024 * 1024, Math.max(1024 * 1024, Math.floor(configured)));
+}
+
+function readPositiveNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getUploadConfig(env) {
+  const maxUploadMb = readPositiveNumber(env.MAX_UPLOAD_SIZE_MB, 0);
+  const speedLimitMbps = readPositiveNumber(env.UPLOAD_SPEED_LIMIT_MBPS, 0);
+  const concurrency = Math.min(
+    UPLOAD_API_CONCURRENCY_MAX,
+    Math.max(1, parseInt(env.UPLOAD_API_CONCURRENCY || String(UPLOAD_API_CONCURRENCY_DEFAULT), 10) || UPLOAD_API_CONCURRENCY_DEFAULT)
+  );
+  return {
+    maxUploadSizeBytes: maxUploadMb > 0 ? Math.floor(maxUploadMb * 1024 * 1024) : 0,
+    uploadSpeedLimitBytesPerSecond: speedLimitMbps > 0 ? Math.floor(speedLimitMbps * 1024 * 1024) : 0,
+    uploadApiConcurrency: concurrency
+  };
+}
+
+function uploadTooLargeResponse(config, size) {
+  if (!config.maxUploadSizeBytes || !Number.isFinite(size) || size <= config.maxUploadSizeBytes) return null;
+  return jsonResponse({
+    ok: false,
+    error: `file exceeds upload limit: ${size}/${config.maxUploadSizeBytes} bytes`,
+    maxUploadSizeBytes: config.maxUploadSizeBytes
+  }, 413);
+}
+
+function missingUploadSizeResponse(config, size) {
+  if (!config.maxUploadSizeBytes || Number.isSafeInteger(size) && size > 0) return null;
+  return jsonResponse({ ok: false, error: 'missing file size for upload limit check' }, 400);
+}
+
+function contentLengthOf(request) {
+  const value = Number(request.headers.get('Content-Length') || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function expectedTotalParts(fileSize, chunkSize) {
+  return Math.ceil(fileSize / chunkSize);
+}
+
+function validateMultipartShape({ fileSize, chunkSize, totalParts }) {
+  if (!Number.isSafeInteger(fileSize) || fileSize <= 0) return 'invalid file size';
+  if (!Number.isSafeInteger(chunkSize) || chunkSize < MULTIPART_MIN_CHUNK_BYTES || chunkSize > MULTIPART_MAX_CHUNK_BYTES) {
+    return 'invalid chunk size';
+  }
+  if (!Number.isSafeInteger(totalParts) || totalParts < 1 || totalParts > MULTIPART_MAX_PARTS) {
+    return 'invalid part count';
+  }
+  if (expectedTotalParts(fileSize, chunkSize) !== totalParts) {
+    return 'part count mismatch';
+  }
+  return '';
 }
 
 function normalizeNodeUrl(url = '') {
@@ -5177,6 +5354,12 @@ async function handleStorageNodeApi(request, env) {
   if (url.pathname === '/api/node/part' && request.method === 'PUT') {
     const expectedSize = Number(url.searchParams.get('size') || 0);
     const contentLength = Number(request.headers.get('Content-Length') || 0);
+    if ((expectedSize > MULTIPART_MAX_CHUNK_BYTES) || (contentLength > MULTIPART_MAX_CHUNK_BYTES)) {
+      return new Response(JSON.stringify({ ok: false, error: 'part too large' }), {
+        status: 413,
+        headers: nodeCorsHeaders({ 'Content-Type': 'application/json;charset=UTF-8' })
+      });
+    }
     if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
       return new Response(JSON.stringify({ ok: false, error: 'part size mismatch' }), {
         status: 400,
@@ -5263,6 +5446,7 @@ export default {
     const siteTitle = env.SITE_TITLE || 'R2 云盘';
     const cloudIconUrl = env.CLOUD_ICON_URL || '';
     const loginBackgroundUrl = env.LOGIN_BACKGROUND_URL || '';
+    const uploadConfig = getUploadConfig(env);
 
     if (!R2) {
       return new Response('未配置 R2 存储桶。请在 wrangler.toml 中绑定 R2_BUCKET。', { status: 500 });
@@ -5502,6 +5686,10 @@ export default {
       return Response.json({ folders, files });
     }
 
+    if (path === '/api/upload-config' && request.method === 'GET') {
+      return jsonResponse(uploadConfig);
+    }
+
         // Storage usage (for capacity display)
         if (path === '/api/storage') {
           const nodes = await getStorageNodes(env);
@@ -5561,10 +5749,18 @@ export default {
     if (path === '/api/upload' && request.method === 'POST') {
       const filePath = url.searchParams.get('path');
       if (!filePath) return new Response('Missing path', { status: 400 });
+      const directSize = contentLengthOf(request);
+      const tooLarge = uploadTooLargeResponse(uploadConfig, directSize);
+      if (tooLarge) return tooLarge;
       const cleanPath = assertVirtualPath(filePath);
       const mime = getMimeType(filePath);
       const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'file');
       const object = await R2.put(storageKey, request.body, { httpMetadata: { contentType: mime } });
+      const storedTooLarge = uploadTooLargeResponse(uploadConfig, Number(object?.size || 0));
+      if (storedTooLarge) {
+        await R2.delete(storageKey);
+        return storedTooLarge;
+      }
       await replaceFileEntry(env, R2, fileEntryFromR2Meta(cleanPath, storageKey, object, {
         contentType: mime,
         storageType: 'r2'
@@ -5574,8 +5770,13 @@ export default {
 
     // Multipart upload for files larger than the Worker request body limit.
     if (path === '/api/multipart/init' && request.method === 'POST') {
-      const { path: filePath, contentType } = await request.json().catch(() => ({}));
+      const { path: filePath, size, contentType } = await request.json().catch(() => ({}));
       if (!filePath) return new Response('Missing path', { status: 400 });
+      const fileSize = Number(size || 0);
+      const missingSize = missingUploadSizeResponse(uploadConfig, fileSize);
+      if (missingSize) return missingSize;
+      const tooLarge = uploadTooLargeResponse(uploadConfig, fileSize);
+      if (tooLarge) return tooLarge;
       const cleanPath = assertVirtualPath(filePath);
       const mime = contentType || getMimeType(filePath);
       const storageKey = await createStorageKeyForPath(env, R2, cleanPath, 'multipart');
@@ -5583,6 +5784,7 @@ export default {
       await kvPutRaw(env, R2_MULTIPART_SESSION_PREFIX + upload.uploadId, JSON.stringify({
         path: cleanPath,
         storageKey,
+        size: fileSize,
         contentType: mime,
         createdAt: new Date().toISOString()
       }), { expirationTtl: 86400 });
@@ -5600,6 +5802,12 @@ export default {
       if (!raw) return new Response('Multipart session expired', { status: 404 });
       const session = JSON.parse(raw);
       if (assertVirtualPath(filePath) !== session.path) return new Response('Multipart path mismatch', { status: 400 });
+      const partSize = contentLengthOf(request);
+      if (partSize > MULTIPART_MAX_CHUNK_BYTES) {
+        return jsonResponse({ ok: false, error: 'multipart part too large' }, 413);
+      }
+      const tooLarge = uploadTooLargeResponse(uploadConfig, Number(session.size || 0));
+      if (tooLarge) return tooLarge;
       const upload = R2.resumeMultipartUpload(session.storageKey, uploadId);
       const part = await upload.uploadPart(partNumber, request.body);
       return Response.json(part);
@@ -5654,6 +5862,9 @@ export default {
       }
       const expectedSize = Math.max(0, Number(part.size || 0));
       const contentLength = Number(request.headers.get('Content-Length') || 0);
+      if (expectedSize > MULTIPART_MAX_CHUNK_BYTES || contentLength > MULTIPART_MAX_CHUNK_BYTES) {
+        return jsonResponse({ ok: false, error: 'part too large' }, 413);
+      }
       if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
         return jsonResponse({ ok: false, error: 'part size mismatch' }, 400);
       }
@@ -5688,6 +5899,9 @@ export default {
 
       const expectedSize = Math.max(0, Number(part.size || 0));
       const contentLength = Number(request.headers.get('Content-Length') || 0);
+      if (expectedSize > MULTIPART_MAX_CHUNK_BYTES || contentLength > MULTIPART_MAX_CHUNK_BYTES) {
+        return jsonResponse({ ok: false, error: 'part too large' }, 413);
+      }
       if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
         return jsonResponse({ ok: false, error: 'part size mismatch' }, 400);
       }
@@ -5722,6 +5936,10 @@ export default {
       if (!filePath || fileSize <= 0 || chunkSize <= 0 || totalParts <= 0) {
         return jsonResponse({ ok: false, error: 'missing fields' }, 400);
       }
+      const tooLarge = uploadTooLargeResponse(uploadConfig, fileSize);
+      if (tooLarge) return tooLarge;
+      const shapeError = validateMultipartShape({ fileSize, chunkSize, totalParts });
+      if (shapeError) return jsonResponse({ ok: false, error: shapeError }, 400);
       if (fileSize <= DISTRIBUTED_UPLOAD_THRESHOLD_BYTES) {
         return jsonResponse({ ok: false, error: 'file below distributed threshold' }, 409);
       }
@@ -6030,7 +6248,7 @@ export default {
       const prefix = url.searchParams.get('path') || '';
       const cleanPrefix = assertVirtualPath(prefix, { allowRoot: true });
       const { folders, files } = await listDirectory(env, cleanPrefix);
-      const html = renderDrivePage(folders, files, cleanPrefix, siteTitle, cloudIconUrl);
+      const html = renderDrivePage(folders, files, cleanPrefix, siteTitle, cloudIconUrl, uploadConfig);
       return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 

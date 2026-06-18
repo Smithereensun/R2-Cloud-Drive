@@ -49,6 +49,11 @@ database_id = "your-database-id"
 | `LOGIN_BACKGROUND_URL` | 登录页背景图 |
 | `STORAGE_NODE_TOKEN` | 当前 Worker 作为存储节点时校验主控请求 |
 | `DOWNLOAD_RANGE_SIZE_MB` | 服务端拼接分布式文件时的内部读取片段大小，范围 1~32 MiB，默认 32 MiB |
+| `MAX_UPLOAD_SIZE_MB` | 单文件最大上传大小，单位 MiB，0 或不设置表示不限制；超限返回 413 |
+| `UPLOAD_SPEED_LIMIT_MBPS` | 浏览器端平均上传限速，单位 MiB/s，0 或不设置表示不限制 |
+| `UPLOAD_API_CONCURRENCY` | 上传接口并发数，控制直传/分片请求并发，范围 1~16，默认 3 |
+
+当前版本不支持 WebDAV。路由层没有处理 `PROPFIND`、`MKCOL`、`MOVE`、`COPY`、`LOCK` 等 WebDAV 方法；如果需要 WebDAV，需要新增一套协议适配层，把 WebDAV 路径操作映射到现有虚拟文件系统和 R2/D1 元数据模型。
 
 ## 3. 代码分层速览
 
@@ -822,4 +827,3 @@ Content-Type: application/json
 
 {"sessionId":"..."}
 ```
-
