@@ -93,7 +93,7 @@ function createR2() {
 
 const env = {
   ACCESS_PASSWORD: 'secret',
-  WEBDAV_USERNAME: 'davuser',
+  WEBDAV_USER: 'davuser',
   CLIPBOARD_KV: createKv(),
   R2_BUCKET: createR2()
 };

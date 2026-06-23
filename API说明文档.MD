@@ -1755,7 +1755,7 @@ https://your-worker.workers.dev/webdav/
 
 - 设置了 `ACCESS_PASSWORD` 时使用 Basic Auth。
 - 密码填写 `ACCESS_PASSWORD`。
-- 设置 `WEBDAV_USERNAME` 时，用户名必须填写该值；未设置时用户名可任意填写。
+- 设置 `WEBDAV_USER` 时，用户名必须填写该值；未设置时用户名可任意填写。
 - 未设置 `ACCESS_PASSWORD` 时公开访问。
 
 ### 支持的方法
@@ -1777,13 +1777,13 @@ https://your-worker.workers.dev/webdav/
 ```http
 PROPFIND /webdav/docs/
 Depth: 1
-Authorization: Basic base64(WEBDAV_USERNAME:ACCESS_PASSWORD)
+Authorization: Basic base64(WEBDAV_USER:ACCESS_PASSWORD)
 ```
 
 ```http
 PUT /webdav/docs/readme.txt
 Content-Type: text/plain
-Authorization: Basic base64(WEBDAV_USERNAME:ACCESS_PASSWORD)
+Authorization: Basic base64(WEBDAV_USER:ACCESS_PASSWORD)
 
 hello
 ```

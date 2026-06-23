@@ -95,7 +95,7 @@
 | 变量名                   | 说明                                                                | 是否必须 | 默认值           |
 | ------------------------ | ------------------------------------------------------------------- | -------- | ---------------- |
 | `ACCESS_PASSWORD`        | 访问密码，不设置则为公开访问                                        | 可选     | 无               |
-| `WEBDAV_USERNAME`        | WebDAV Basic Auth 用户名；不设置则只校验密码，用户名可任意填写      | 可选     | 不限制           |
+| `WEBDAV_USER`            | WebDAV Basic Auth 用户名；不设置则只校验密码，用户名可任意填写      | 可选     | 不限制           |
 | `SHARED_FOLDER_DISABLED` | 是否禁用 `/shared` 公开共享文件夹，设为 `true` / `1` / `yes` 开启   | 可选     | false            |
 | `SITE_TITLE`             | 站点标题                                                            | 可选     | `R2 云盘`        |
 | `CLOUD_ICON_URL`         | 云盘图标图片链接                                                    | 可选     | 橙色圆角云朵图标 |
@@ -172,7 +172,7 @@ WebDAV 入口为：
 https://你的域名/webdav/
 ```
 
-支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、`LOCK`、`UNLOCK`。设置了 `ACCESS_PASSWORD` 时，WebDAV 使用 Basic Auth，密码填写 `ACCESS_PASSWORD`；如设置 `WEBDAV_USERNAME`，用户名也必须匹配该值，未设置时用户名可任意填写。未设置密码时 WebDAV 与网页端一样公开访问。
+支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、`LOCK`、`UNLOCK`。设置了 `ACCESS_PASSWORD` 时，WebDAV 使用 Basic Auth，密码填写 `ACCESS_PASSWORD`；如设置 `WEBDAV_USER`，用户名也必须匹配该值，未设置时用户名可任意填写。未设置密码时 WebDAV 与网页端一样公开访问。
 
 注意：WebDAV 的 `PUT` 是单请求上传，受 Cloudflare Worker 单请求体限制和 `MAX_UPLOAD_SIZE_MB` 限制；超大文件仍建议使用网页端分片/分布式上传。
 

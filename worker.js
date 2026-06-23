@@ -22,7 +22,8 @@
  * 3. 访问密码 (可选 - 不设置则为公开访问)
  *    在 Worker 环境变量中设置:
  *    ACCESS_PASSWORD = "your-password"
- *    WEBDAV_USERNAME = "your-webdav-user"  // 可选，仅限制 WebDAV Basic Auth 用户名
+ *    WEBDAV_USER = "your-webdav-user"      // 可选，仅限制 WebDAV Basic Auth 用户名
+ *    WEBDAV_USERNAME = "your-webdav-user"  // 可选，兼容别名
  *    SHARED_FOLDER_DISABLED = "true"       // 可选，禁用 /shared 公开共享文件夹
  *
  * 4. 站点标题 (可选)
@@ -5405,7 +5406,7 @@ function isWebDavAuthorized(request, env) {
   const sep = decoded.indexOf(':');
   const username = sep >= 0 ? decoded.slice(0, sep) : '';
   const password = sep >= 0 ? decoded.slice(sep + 1) : decoded;
-  const expectedUsername = String(env.WEBDAV_USERNAME || '').trim();
+  const expectedUsername = String(env.WEBDAV_USER || env.WEBDAV_USERNAME || '').trim();
   if (expectedUsername && username !== expectedUsername) return false;
   return password === env.ACCESS_PASSWORD;
 }
