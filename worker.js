@@ -43,6 +43,10 @@
  *    UPLOAD_SPEED_LIMIT_MBPS = "20"      单浏览器上传平均限速，0 或不设置表示不限制
  *    UPLOAD_API_CONCURRENCY = "3"        上传分片/直传请求并发数，范围 1-16
  *
+ * 9. Cloudflare Turnstile (可选)
+ *    TURNSTILE_SITE_KEY = "your-site-key"
+ *    TURNSTILE_SECRET_KEY = "your-secret-key"
+ *
  * ============================================
  * 功能列表
  * ============================================
@@ -2808,11 +2812,12 @@ document.addEventListener('DOMContentLoaded', () => {
 </html>`;
 }
 
-function renderLoginPage(error = '', siteTitle = 'R2 云盘', cloudIconUrl = '', loginBackgroundUrl = '') {
+function renderLoginPage(error = '', siteTitle = 'R2 云盘', cloudIconUrl = '', loginBackgroundUrl = '', turnstileSiteKey = '') {
   const bgUrl = String(loginBackgroundUrl || '').trim();
   const loginBg = bgUrl
     ? `<img class="login-bg-image" src="${escapeAttr(bgUrl)}" alt="" aria-hidden="true">`
     : '';
+  const turnstileKey = String(turnstileSiteKey || '').trim();
   return renderHTML(`
 <div class="login-wrap">
   ${loginBg}
@@ -2828,7 +2833,8 @@ function renderLoginPage(error = '', siteTitle = 'R2 云盘', cloudIconUrl = '',
     <label class="field-label" for="pwd">访问密码</label>
     <input class="text-field" id="pwd" type="password" placeholder="请输入密码" autofocus
       onkeydown="if(event.key==='Enter')login()">
-        <p class="login-error" id="loginError">${error}</p>
+    ${turnstileWidget(turnstileKey)}
+    <p class="login-error" id="loginError">${escapeHtml(error)}</p>
     <button class="login-btn" onclick="login()">登录</button>
     <div style="margin-top:24px;font-size:13px;color:var(--on-surface-variant)">
       <a href="/shared" style="color:var(--primary);text-decoration:none;display:flex;align-items:center;justify-content:center;gap:4px">
@@ -2837,12 +2843,27 @@ function renderLoginPage(error = '', siteTitle = 'R2 云盘', cloudIconUrl = '',
     </div>
   </div>
 </div>
+${turnstileScriptTag(turnstileKey)}
 <script>
 function login() {
   const pwd = document.getElementById('pwd').value;
-  fetch('/api/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) })
+  const turnstileToken = document.querySelector('[name="cf-turnstile-response"]')?.value || '';
+  fetch('/api/login', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      password: pwd,
+      turnstileToken,
+      'cf-turnstile-response': turnstileToken
+    })
+  })
     .then(r => r.json()).then(d => {
-      if (d.ok) location.href = '/'; else document.getElementById('loginError').textContent = '密码错误，请重试';
+      if (d.ok) {
+        location.href = '/';
+        return;
+      }
+      document.getElementById('loginError').textContent = d.error || '密码错误，请重试';
+      if (window.turnstile) window.turnstile.reset();
     });
 }
 </script>
@@ -3487,6 +3508,7 @@ const MULTIPART_MAX_CHUNK_BYTES = 90 * 1024 * 1024;
 const MULTIPART_MAX_PARTS = 10000;
 const UPLOAD_API_CONCURRENCY_DEFAULT = 3;
 const UPLOAD_API_CONCURRENCY_MAX = 16;
+const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
 async function generateToken(password, secret) {
   const data = `${password}:${secret}:${Date.now()}`;
@@ -3563,6 +3585,79 @@ function envFlag(value) {
 
 function isSharedFolderDisabled(env) {
   return envFlag(env.SHARED_FOLDER_DISABLED);
+}
+
+function getTurnstileConfig(env) {
+  return {
+    siteKey: String(env.TURNSTILE_SITE_KEY || '').trim(),
+    secretKey: String(env.TURNSTILE_SECRET_KEY || '').trim()
+  };
+}
+
+function isTurnstileEnabled(env) {
+  const config = getTurnstileConfig(env);
+  return Boolean(config.siteKey && config.secretKey);
+}
+
+function turnstileScriptTag(siteKey = '') {
+  if (!String(siteKey || '').trim()) return '';
+  return '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>';
+}
+
+function turnstileWidget(siteKey = '', theme = 'auto') {
+  const cleanSiteKey = String(siteKey || '').trim();
+  if (!cleanSiteKey) return '';
+  return `<div class="turnstile-wrap"><div class="cf-turnstile" data-sitekey="${escapeAttr(cleanSiteKey)}" data-theme="${escapeAttr(theme)}"></div></div>`;
+}
+
+function getTurnstileToken(body = {}) {
+  return String(
+    body.turnstileToken ||
+    body.turnstile_token ||
+    body['cf-turnstile-response'] ||
+    ''
+  ).trim();
+}
+
+function getClientIp(request) {
+  const cfIp = String(request.headers.get('CF-Connecting-IP') || '').trim();
+  if (cfIp) return cfIp;
+  const forwarded = String(request.headers.get('X-Forwarded-For') || '').trim();
+  if (!forwarded) return '';
+  return forwarded.split(',')[0]?.trim() || '';
+}
+
+async function verifyTurnstileToken(request, env, token) {
+  if (!isTurnstileEnabled(env)) return { ok: true, skipped: true };
+  if (!String(token || '').trim()) {
+    return { ok: false, error: '请完成人机验证' };
+  }
+
+  const { secretKey } = getTurnstileConfig(env);
+  const form = new URLSearchParams();
+  form.set('secret', secretKey);
+  form.set('response', String(token).trim());
+  const remoteIp = getClientIp(request);
+  if (remoteIp) form.set('remoteip', remoteIp);
+
+  try {
+    const response = await fetch(TURNSTILE_VERIFY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.success) {
+      return {
+        ok: false,
+        error: '人机验证失败，请重试',
+        codes: Array.isArray(data?.['error-codes']) ? data['error-codes'] : []
+      };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: '人机验证服务暂时不可用，请稍后重试' };
+  }
 }
 
 function getUploadConfig(env) {
@@ -5300,9 +5395,10 @@ async function verifySharePassword(share, password = '') {
   return await sha256Hex(password) === share.passwordHash;
 }
 
-function renderSharePasswordPage(share, error = '', siteTitle = 'R2 云盘', cloudIconUrl = '') {
+function renderSharePasswordPage(share, error = '', siteTitle = 'R2 云盘', cloudIconUrl = '', turnstileSiteKey = '') {
   const name = virtualPathName(share.path);
   const expiresText = share.expiresAt ? new Date(share.expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '永久有效';
+  const turnstileKey = String(turnstileSiteKey || '').trim();
   return renderHTML(`
 <div class="login-wrap">
   <button class="icon-btn login-theme-toggle" id="darkModeToggle" title="夜间模式" onclick="toggleDarkMode(event)">
@@ -5317,17 +5413,24 @@ function renderSharePasswordPage(share, error = '', siteTitle = 'R2 云盘', clo
     <label class="field-label" for="sharePwd">分享密码</label>
     <input class="text-field" id="sharePwd" type="password" placeholder="请输入分享密码" autofocus
       onkeydown="if(event.key==='Enter')submitSharePassword()">
+    ${turnstileWidget(turnstileKey)}
     <p class="login-error" id="shareError">${escapeHtml(error)}</p>
     <button class="login-btn" onclick="submitSharePassword()">下载文件</button>
   </div>
 </div>
+${turnstileScriptTag(turnstileKey)}
 <script>
 function submitSharePassword() {
   const pwd = document.getElementById('sharePwd').value;
+  const turnstileToken = document.querySelector('[name="cf-turnstile-response"]')?.value || '';
   fetch(location.pathname, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ password: pwd })
+    body: JSON.stringify({
+      password: pwd,
+      turnstileToken,
+      'cf-turnstile-response': turnstileToken
+    })
   }).then(async r => {
     if (r.ok) {
       const blob = await r.blob();
@@ -5340,9 +5443,11 @@ function submitSharePassword() {
     } else {
       const data = await r.json().catch(() => ({}));
       document.getElementById('shareError').textContent = data.error || '密码错误或分享已失效';
+      if (window.turnstile) window.turnstile.reset();
     }
   }).catch(() => {
     document.getElementById('shareError').textContent = '下载失败，请稍后重试';
+    if (window.turnstile) window.turnstile.reset();
   });
 }
 </script>
@@ -5358,18 +5463,27 @@ async function handlePublicShareRequest(request, env, R2, siteTitle, cloudIconUr
   if (!entry) return new Response('File not found', { status: 404 });
 
   let password = url.searchParams.get('password') || '';
+  let turnstileToken = '';
   if (request.method === 'POST') {
     const body = await request.json().catch(() => ({}));
     password = String(body.password || password || '');
+    turnstileToken = getTurnstileToken(body);
   }
 
   if (!await verifySharePassword(share, password)) {
     if (request.method === 'GET' && !password) {
-      return new Response(renderSharePasswordPage(share, '', siteTitle, cloudIconUrl), {
+      return new Response(renderSharePasswordPage(share, '', siteTitle, cloudIconUrl, getTurnstileConfig(env).siteKey), {
         headers: { 'Content-Type': 'text/html;charset=UTF-8' }
       });
     }
     return jsonResponse({ ok: false, error: '密码错误或分享已失效' }, 403);
+  }
+
+  if (share?.passwordHash && request.method === 'POST') {
+    const turnstileResult = await verifyTurnstileToken(request, env, turnstileToken);
+    if (!turnstileResult.ok) {
+      return jsonResponse({ ok: false, error: turnstileResult.error || '人机验证失败，请重试' }, 403);
+    }
   }
 
   return storedVirtualFileResponse(request, R2, share.path, env, {
@@ -5939,6 +6053,7 @@ export default {
     const cloudIconUrl = env.CLOUD_ICON_URL || '';
     const loginBackgroundUrl = env.LOGIN_BACKGROUND_URL || '';
     const uploadConfig = getUploadConfig(env);
+    const turnstileConfig = getTurnstileConfig(env);
 
     if (!R2) {
       return new Response('未配置 R2 存储桶。请在 wrangler.toml 中绑定 R2_BUCKET。', { status: 500 });
@@ -5958,13 +6073,16 @@ export default {
 
         // ── Auth endpoints ──
     if (path === '/login') {
-      if (request.method === 'GET') return new Response(renderLoginPage('', siteTitle, cloudIconUrl, loginBackgroundUrl), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+      if (request.method === 'GET') return new Response(renderLoginPage('', siteTitle, cloudIconUrl, loginBackgroundUrl, turnstileConfig.siteKey), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
     if (path === '/api/login' && request.method === 'POST') {
       if (!env.ACCESS_PASSWORD) return Response.json({ ok: true });
-      const { password } = await request.json().catch(() => ({}));
-      if (password !== env.ACCESS_PASSWORD) return Response.json({ ok: false });
+      const body = await request.json().catch(() => ({}));
+      const password = String(body.password || '');
+      const turnstileResult = await verifyTurnstileToken(request, env, getTurnstileToken(body));
+      if (!turnstileResult.ok) return jsonResponse({ ok: false, error: turnstileResult.error || '人机验证失败，请重试' }, 403);
+      if (password !== env.ACCESS_PASSWORD) return jsonResponse({ ok: false, error: '密码错误，请重试' }, 403);
       const token = await generateToken(password, env.ACCESS_PASSWORD);
       return new Response(JSON.stringify({ ok: true }), {
         headers: {

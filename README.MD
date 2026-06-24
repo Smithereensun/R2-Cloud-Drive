@@ -105,6 +105,8 @@
 | `MAX_UPLOAD_SIZE_MB`     | 单文件最大上传大小（MiB），`0` 或不设置表示不限制                   | 可选     | 不限制           |
 | `UPLOAD_SPEED_LIMIT_MBPS`| 浏览器端平均上传限速（MiB/s），`0` 或不设置表示不限制               | 可选     | 不限制           |
 | `UPLOAD_API_CONCURRENCY` | 上传接口并发数，控制直传/分片上传请求并发，范围 1~16                | 可选     | 3                |
+| `TURNSTILE_SITE_KEY`     | Cloudflare Turnstile 站点 Key；设置后登录页和分享密码页显示验证框    | 可选     | 不启用           |
+| `TURNSTILE_SECRET_KEY`   | Cloudflare Turnstile Secret Key；与站点 Key 一起启用服务端校验       | 可选     | 不启用           |
 
 设置方法：
 
@@ -114,6 +116,7 @@
 4. 选择变量类型：
    - `ACCESS_PASSWORD` 建议选择 **Secret**
    - `STORAGE_NODE_TOKEN` 建议选择 **Secret**
+   - `TURNSTILE_SECRET_KEY` 建议选择 **Secret**
    - `SITE_TITLE`、`CLOUD_ICON_URL`、`LOGIN_BACKGROUND_URL` 可选择普通文本变量
 5. 填写变量名和值
 6. 点击 **Save**
@@ -163,6 +166,33 @@
 选中单个文件后点击「分享」或右键「创建分享」，可以生成独立分享链接。分享链接支持可选访问密码和有效期（1 小时、1 天、7 天、30 天或永久有效）。密码只保存 SHA-256 哈希，不保存明文。
 
 `SHARED_FOLDER_DISABLED=true` 只会禁用 `/shared` 公开共享文件夹，不影响单文件分享链接 `/share/<token>`。
+
+### Cloudflare Turnstile 人机验证
+
+设置 `TURNSTILE_SITE_KEY` 和 `TURNSTILE_SECRET_KEY` 后，系统会自动启用 Turnstile，并保护以下入口：
+
+1. `/login` 登录页与 `/api/login`
+2. 带密码的单文件分享访问页 `/share/<token>`
+
+如果这两个变量任意一个未设置，则 Turnstile 不启用，页面也不会显示验证框。
+
+Cloudflare 中的推荐配置方式：
+
+1. 进入 Cloudflare Dashboard → **Turnstile**
+2. 创建一个站点，域名填写你的 Worker 域名或自定义域名
+3. 复制生成的 **Site Key** 和 **Secret Key**
+4. 回到 Worker → **Settings** → **Variables and Secrets**
+5. 新增变量：
+   - `TURNSTILE_SITE_KEY`：填写 Site Key
+   - `TURNSTILE_SECRET_KEY`：填写 Secret Key（建议存为 Secret）
+6. 保存后重新 **Deploy**
+
+如果你已经有密钥，可按下面格式填写：
+
+```text
+TURNSTILE_SITE_KEY=your-turnstile-site-key
+TURNSTILE_SECRET_KEY=your-turnstile-secret-key
+```
 
 ### WebDAV 支持
 

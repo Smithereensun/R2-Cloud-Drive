@@ -182,6 +182,87 @@ res = await worker.fetch(new Request('https://example.com' + sharePath, {
 assert.equal(res.status, 200);
 assert.equal(await res.text(), 'hello webdav');
 
+res = await worker.fetch(new Request('https://example.com/api/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ password: 'secret' })
+}), env, ctx);
+assert.equal(res.status, 200);
+assert.equal((await res.json()).ok, true);
+
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (input, init = {}) => {
+  if (String(input) === 'https://challenges.cloudflare.com/turnstile/v0/siteverify') {
+    const body = String(init.body || '');
+    const params = new URLSearchParams(body);
+    const responseToken = params.get('response');
+    return Response.json({ success: responseToken === 'pass-token' });
+  }
+  return originalFetch(input, init);
+};
+
+const turnstileEnv = {
+  ...env,
+  TURNSTILE_SITE_KEY: 'site-key',
+  TURNSTILE_SECRET_KEY: 'secret-key'
+};
+
+try {
+  res = await worker.fetch(new Request('https://example.com/login'), turnstileEnv, ctx);
+  assert.equal(res.status, 200);
+  const loginHtml = await res.text();
+  assert.match(loginHtml, /cf-turnstile/);
+  assert.match(loginHtml, /site-key/);
+
+  res = await worker.fetch(new Request('https://example.com/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'secret' })
+  }), turnstileEnv, ctx);
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).error, '请完成人机验证');
+
+  res = await worker.fetch(new Request('https://example.com/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'secret', turnstileToken: 'fail-token' })
+  }), turnstileEnv, ctx);
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).error, '人机验证失败，请重试');
+
+  res = await worker.fetch(new Request('https://example.com/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'secret', turnstileToken: 'pass-token' })
+  }), turnstileEnv, ctx);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).ok, true);
+
+  res = await worker.fetch(new Request('https://example.com' + sharePath), turnstileEnv, ctx);
+  assert.equal(res.status, 200);
+  const shareHtml = await res.text();
+  assert.match(shareHtml, /cf-turnstile/);
+  assert.match(shareHtml, /site-key/);
+
+  res = await worker.fetch(new Request('https://example.com' + sharePath, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'sharepass' })
+  }), turnstileEnv, ctx);
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).error, '请完成人机验证');
+
+  res = await worker.fetch(new Request('https://example.com' + sharePath, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'sharepass', turnstileToken: 'pass-token' })
+  }), turnstileEnv, ctx);
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), 'hello webdav');
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 const disabledEnv = { ...env, SHARED_FOLDER_DISABLED: 'true' };
 res = await worker.fetch(new Request('https://example.com/shared'), disabledEnv, ctx);
 assert.equal(res.status, 404);
